@@ -1,0 +1,45 @@
+{
+  "name": "sethji",
+  "version": "0.1.1",
+  "description": "Multi-agent terminal orchestrator: run AI coding CLIs as a role-based crew (architect, coder, QA) from one terminal.",
+  "type": "module",
+  "author": "Yashwant Midha",
+  "license": "MIT",
+  "bin": {
+    "sethji": "bin/cli.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "crew.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yashwantmidha/sethji.git"
+  },
+  "homepage": "https://github.com/yashwantmidha/sethji#readme",
+  "bugs": {
+    "url": "https://github.com/yashwantmidha/sethji/issues"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "orchestrator",
+    "claude",
+    "codex",
+    "gemini",
+    "cli",
+    "multi-agent"
+  ]
+}

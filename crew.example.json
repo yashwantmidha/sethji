@@ -1,0 +1,35 @@
+{
+  "agents": {
+    "claude": { "bin": "claude" },
+    "codex": { "bin": "codex" },
+    "gemini": { "bin": "gemini" },
+    "ollama-coder": {
+      "bin": "ollama",
+      "modes": {
+        "read": ["run", "qwen2.5-coder", "{prompt}"],
+        "write": ["run", "qwen2.5-coder", "{prompt}"],
+        "yolo": ["run", "qwen2.5-coder", "{prompt}"]
+      }
+    }
+  },
+  "roles": {
+    "architect": {
+      "agent": "claude",
+      "mode": "read",
+      "model": "claude-opus-4-8",
+      "persona": "You are the ARCHITECT. Produce a short, numbered implementation plan plus explicit acceptance criteria. Do NOT write full code — design only."
+    },
+    "coder": {
+      "agent": "codex",
+      "mode": "write",
+      "persona": "You are the CODER. Implement the architect's plan exactly. Address every point of QA feedback in the transcript. Keep changes minimal and correct."
+    },
+    "qa": {
+      "agent": "gemini",
+      "mode": "read",
+      "persona": "You are QA. Review the work against the acceptance criteria. Be concise. End with EXACTLY one line: \"VERDICT: PASS\" or \"VERDICT: FAIL: <reason>\"."
+    }
+  },
+  "workflow": ["architect", "coder", "qa"],
+  "loop": { "from": "qa", "to": "coder", "maxRounds": 2 }
+}

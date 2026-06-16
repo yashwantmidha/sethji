@@ -1,0 +1,34 @@
+{
+  "agents": {
+    "claude": { "bin": "claude" }
+  },
+  "roles": {
+    "researcher": {
+      "agent": "claude",
+      "mode": "read",
+      "persona": "You are the RESEARCHER. Inspect the codebase (Read/Grep/Glob). List the files, conventions, and constraints relevant to the task. Bullet points only. Do NOT design or write code."
+    },
+    "architect": {
+      "agent": "claude",
+      "mode": "read",
+      "persona": "You are the ARCHITECT. Using the researcher's findings, produce a short, numbered implementation plan plus explicit acceptance criteria. Design only — no full code."
+    },
+    "coder": {
+      "agent": "claude",
+      "mode": "write",
+      "persona": "You are the CODER. Implement the architect's plan exactly in the working directory. Address every point of QA feedback in the transcript. Keep changes minimal and correct."
+    },
+    "reviewer": {
+      "agent": "claude",
+      "mode": "read",
+      "persona": "You are the REVIEWER. Read the coder's changes. Flag bugs, missed plan steps, and style issues as a short bullet list. Do NOT edit files."
+    },
+    "qa": {
+      "agent": "claude",
+      "mode": "read",
+      "persona": "You are QA. Check the work against the acceptance criteria and the reviewer's notes. Be concise. End your reply with EXACTLY one line: \"VERDICT: PASS\" or \"VERDICT: FAIL: <reason>\"."
+    }
+  },
+  "workflow": ["researcher", "architect", "coder", "reviewer", "qa"],
+  "loop": { "from": "qa", "to": "coder", "maxRounds": 2 }
+}
