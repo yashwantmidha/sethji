@@ -4,8 +4,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { BUILTIN_ADAPTERS, mergeAdapters } from "../src/adapters.js";
-import { runAgent, isInstalled } from "../src/run.js";
-import { DEFAULT_CREW, loadCrew } from "../src/config.js";
+import { runAgent, isInstalled, createWorkBranch } from "../src/run.js";
+import { DEFAULT_CREW, loadCrew, validateCrew } from "../src/config.js";
 import { buildInvocation } from "../src/adapters.js";
 import { orchestrate } from "../src/orchestrate.js";
 import { createRunDir, createLogger } from "../src/logs.js";
@@ -44,6 +44,10 @@ const HELP = `sethji — run AI coding CLIs as a role-based crew (architect · c
 
 Usage:
   sethji run "<task>" [--crew crew.json] [--cwd dir] [--tmux] [--no-color] [--timeout sec] [--json]
+             [--no-branch]  runs on a fresh sethji/run-<stamp> git branch by default
+             [--agent role=cli,…] [--model role=name,…] [--effort role=level,…]
+             per-role overrides; a bare value ("--model opus") applies to every
+             role that can take it
   sethji plan "<what you need>" [--out crew.json] [--crew crew.json] [--cwd dir] [--timeout sec]
   sethji ask <agent> "<prompt>" [--mode read|write|yolo] [--cwd dir] [--crew crew.json] [--timeout sec]
   sethji list [--crew crew.json]       show known agents (+ your declared ones) and install status
@@ -109,6 +113,13 @@ async function cmdRun(positionals, flags) {
     crew = DEFAULT_CREW;
   }
 
+  try {
+    crew = applyRoleOverrides(crew, flags);
+  } catch (err) {
+    fail(err.message);
+    return;
+  }
+
   // Task: the argument, or fall back to the one `plan` stamped into the crew.
   const task = positionals[0] || crew.task;
   if (!task) {
@@ -116,6 +127,13 @@ async function cmdRun(positionals, flags) {
     return;
   }
   const timeout = flags.timeout ? Number(flags.timeout) * 1000 : 0;
+
+  // Work on a fresh branch when possible so agent edits are easy to revert.
+  // Skipped outside git repos, on sethji/* branches, or with --no-branch.
+  if (!flags["no-branch"]) {
+    const branch = await createWorkBranch(cwd);
+    if (branch) process.stdout.write(`On new branch ${branch} (undo: git checkout -).\n`);
+  }
 
   // Every run gets a log folder the main can review at the end.
   const { dir } = createRunDir(flags.cwd || ".");
@@ -283,6 +301,54 @@ async function cmdVersion() {
   const url = new URL("../package.json", import.meta.url);
   const pkg = JSON.parse(await readFile(url, "utf8"));
   process.stdout.write(`${pkg.version}\n`);
+}
+
+// Apply --agent / --model / --effort overrides to a crew's roles.
+// Spec: "coder=o3,qa=flash" targets roles by name; a bare "o3" applies to
+// every workflow role that can take it. Re-validates the crew so a bad role
+// name or unsupported agent fails fast with a friendly error.
+function applyRoleOverrides(crew, flags) {
+  const specs = [
+    ["agent", null, flags.agent],
+    ["model", "modelFlag", flags.model],
+    ["effort", "effortFlag", flags.effort],
+  ];
+  if (!specs.some(([, , v]) => typeof v === "string")) return crew;
+
+  const adapters = mergeAdapters(crew.agents || {}, BUILTIN_ADAPTERS);
+  const roles = { ...crew.roles };
+  const set = (role, field, value) => {
+    roles[role] = { ...roles[role], [field]: value };
+  };
+
+  for (const [field, flagName, spec] of specs) {
+    if (typeof spec !== "string") continue;
+    for (const part of spec.split(",")) {
+      const eq = part.indexOf("=");
+      if (eq === -1) {
+        // Bare value: every workflow role that can take it.
+        for (const role of new Set(crew.workflow)) {
+          const def = roles[role];
+          if (!def) continue;
+          if (flagName && !(adapters[def.agent] && adapters[def.agent][flagName])) continue;
+          set(role, field, part);
+        }
+      } else {
+        const role = part.slice(0, eq).trim();
+        const value = part.slice(eq + 1).trim();
+        if (!roles[role]) {
+          throw new Error(
+            `--${field} targets unknown role "${role}". Roles: ${Object.keys(crew.roles).join(", ")}.`
+          );
+        }
+        set(role, field, value);
+      }
+    }
+  }
+
+  const next = { ...crew, roles };
+  validateCrew(next);
+  return next;
 }
 
 function fail(msg) {

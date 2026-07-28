@@ -66,7 +66,10 @@ npx sethji ask claude "explain what this repo does" --mode read
 ```
 
 - **roles** — each maps a role name to an `agent` (adapter), a `mode`, and a `persona`
-  (the system instruction for that role). Optional `model` overrides the model for that role.
+  (the system instruction for that role). Optional `model` and `effort` override the
+  model and reasoning effort for that role (passed via the adapter's `modelFlag` /
+  `effortFlag`; built-in claude takes both, codex maps effort to
+  `-c model_reasoning_effort=…`, gemini takes neither).
 - **workflow** — the order roles run in.
 - **loop** — after `from` (QA) runs, its verdict is parsed. On `VERDICT: FAIL` with rounds
   left, control jumps back to `to` (coder) and continues. An **unknown or missing verdict
@@ -86,7 +89,11 @@ Each turn's prompt is: role persona + the task + the full transcript so far +
 The optional **`agents`** block in your crew config is where you list the AIs available on
 your machine. Add brand-new agents or override a built-in's `bin`/`modes`. Each entry is
 pure data — `bin` plus a `modes` map whose arrays are argv templates; the literal `{prompt}`
-token is replaced with the real prompt as one argv element:
+token is replaced with the real prompt as one argv element. Optional `modelFlag` and
+`effortFlag` are what let a role's `model`/`effort` fields be passed through — a string
+becomes `<flag> <value>` (e.g. `"model": "opus"` → `--model opus`), an array is an argv
+template with `{model}`/`{effort}` placeholders (codex's effort is
+`["-c", "model_reasoning_effort={effort}"]`):
 
 ```json
 {
@@ -133,6 +140,36 @@ sethji run "add /health endpoint" --crew crew.json
 > "coder" emits code as text without writing it to disk. Keep local models in text roles
 > (architect/QA) and let `claude`/`codex` be the writer, unless you wrap the model in your own
 > apply-the-diff step.
+
+## Menu-bar app (macOS)
+
+A tiny native front-end in the single-file-swiftc style — no Xcode project, no deps:
+
+```bash
+./app/install_app.sh      # builds with swiftc → ~/Applications/sethji.app, launches it
+./app/uninstall_app.sh    # removes it
+```
+
+A **sethji** wordmark appears in the menu bar — it pulses `●` while the crew runs
+and shows `✓`/`✗` when it finishes. Click it: pick a project folder, type a task,
+**Run crew**. The panel shows the crew pipeline as chips (`ARCHITECT → CODER → QA`)
+that light up as each agent takes its turn, the same live stream as the terminal
+with colored role headers, a runtime clock, a loop-round badge, and a verdict
+banner — plus a notification when the run ends. `Logs` opens `.sethji/runs/` for
+that folder. If `./crew.json` exists in the chosen folder it is used automatically
+(and drawn as the pipeline), exactly like the CLI. **⚙ Crew setup** expands a
+per-role row — pick the AI (built-ins plus any agents declared in `crew.json`),
+a model (dropdown of suggestions, free text allowed), and an effort level.
+Overrides are remembered per project folder and passed to the CLI as
+`--agent`/`--model`/`--effort role=value,…` flags. The dropdown suggestions come
+from `models.json` in the app bundle; put your own list at
+`~/.config/sethji/models.json` to override it.
+
+Requires the Xcode Command Line Tools (`swiftc`). The app runs `sethji` from your
+PATH, falling back to this repo's `bin/cli.js` via `node` — the installer wires that
+up. Right-click the wordmark for Logs/Quit. **Stop** sends SIGTERM to the CLI; an
+agent mid-write may leave partial edits, so same rule as always: run in a repo you
+can revert.
 
 ## Programmatic API
 

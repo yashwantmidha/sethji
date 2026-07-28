@@ -17,6 +17,7 @@
       "agent": "claude",
       "mode": "read",
       "model": "claude-opus-4-8",
+      "effort": "high",
       "persona": "You are the ARCHITECT. Produce a short, numbered implementation plan plus explicit acceptance criteria. Do NOT write full code — design only."
     },
     "coder": {

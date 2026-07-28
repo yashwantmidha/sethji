@@ -91,6 +91,32 @@ function spawnFailure(bin, err) {
   };
 }
 
+// Create a fresh git work branch (sethji/run-<stamp>) so a bad crew run is
+// one `git checkout -` away from clean. Best-effort by design: returns the
+// branch name, or null when not in a git repo, git is missing, or we're
+// already on a sethji/* branch (loop rounds must not stack branches).
+export async function createWorkBranch(cwd = ".") {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const git = (args) => promisify(execFile)("git", args, { cwd });
+  try {
+    await git(["rev-parse", "--is-inside-work-tree"]);
+    const { stdout } = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (stdout.trim().startsWith("sethji/")) return null;
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .slice(0, 15)
+      .replace("T", "-");
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const name = `sethji/run-${stamp}-${suffix}`;
+    await git(["checkout", "-b", name]);
+    return name;
+  } catch {
+    return null;
+  }
+}
+
 // Is a CLI installed? Spawn `<bin> --version`; ENOENT => not found.
 export function isInstalled(bin) {
   return new Promise((resolve) => {

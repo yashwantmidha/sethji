@@ -89,6 +89,18 @@ export function validateCrew(crew) {
         `Role "${role}" has invalid mode "${def.mode}". Use one of: ${MODES.join(", ")}.`
       );
     }
+    for (const [field, flag] of [["model", "modelFlag"], ["effort", "effortFlag"]]) {
+      const value = def[field];
+      if (value !== undefined && (typeof value !== "string" || !value)) {
+        throw new Error(`Role "${role}" has an invalid "${field}" — must be a non-empty string.`);
+      }
+      if (value && !adapters[def.agent][flag]) {
+        throw new Error(
+          `Role "${role}" sets a ${field}, but agent "${def.agent}" has no "${flag}". ` +
+            `Add one to its adapter.`
+        );
+      }
+    }
   }
 
   // The loop is optional, but if present it must point at real workflow roles.

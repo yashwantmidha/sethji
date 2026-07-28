@@ -10,6 +10,8 @@
 export const BUILTIN_ADAPTERS = {
   claude: {
     bin: "claude",
+    modelFlag: "--model",
+    effortFlag: "--effort",
     modes: {
       read: ["-p", "{prompt}", "--allowedTools", "Read,Grep,Glob"],
       write: ["-p", "{prompt}", "--permission-mode", "acceptEdits"],
@@ -18,6 +20,8 @@ export const BUILTIN_ADAPTERS = {
   },
   codex: {
     bin: "codex",
+    modelFlag: "--model",
+    effortFlag: ["-c", "model_reasoning_effort={effort}"],
     modes: {
       read: ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "{prompt}"],
       write: ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "{prompt}"],
@@ -26,6 +30,7 @@ export const BUILTIN_ADAPTERS = {
   },
   gemini: {
     bin: "gemini",
+    modelFlag: "--model",
     modes: {
       // Gemini has no separate read/write sandbox flag; -y auto-approves tools.
       read: ["-p", "{prompt}"],
@@ -63,7 +68,12 @@ export function mergeAdapters(roster = {}, base = BUILTIN_ADAPTERS) {
           `unless it overrides a built-in agent of the same name.`
       );
     }
-    merged[name] = { bin, modes };
+    const adapter = { bin, modes };
+    for (const flag of ["modelFlag", "effortFlag"]) {
+      const value = entry[flag] !== undefined ? entry[flag] : fallback[flag];
+      if (value) adapter[flag] = value;
+    }
+    merged[name] = adapter;
   }
   return merged;
 }
@@ -74,20 +84,59 @@ function substitute(args, prompt) {
   return args.map((a) => (a === "{prompt}" ? prompt : a));
 }
 
+// Expand a flag spec into concrete argv elements.
+// A string spec ("--model") becomes [spec, value]; an array spec is a template
+// whose "{model}"/"{effort}" placeholder is replaced with the value
+// (e.g. ["-c", "model_reasoning_effort={effort}"]).
+function flagArgs(spec, placeholder, value) {
+  if (Array.isArray(spec)) {
+    return spec.map((a) => a.split(placeholder).join(value));
+  }
+  return [spec, value];
+}
+
 // Build a concrete invocation for an agent + mode + prompt.
 // Returns { bin, args }. Throws a friendly error for unknown agent/mode.
-export function buildInvocation(agent, mode, prompt, adapters = BUILTIN_ADAPTERS) {
+// Options { model, effort } are injected via the adapter's modelFlag /
+// effortFlag before the prompt, so a role can pin the underlying model and
+// reasoning effort (e.g. claude --model opus --effort high).
+export function buildInvocation(agent, mode, prompt, adapters = BUILTIN_ADAPTERS, options = {}) {
   const adapter = adapters[agent];
   if (!adapter) {
     const known = Object.keys(adapters).join(", ") || "(none)";
     throw new Error(`Unknown agent "${agent}". Known agents: ${known}.`);
   }
-  const template = adapter.modes && adapter.modes[mode];
+  let template = adapter.modes && adapter.modes[mode];
   if (!template) {
     const known = Object.keys(adapter.modes || {}).join(", ") || "(none)";
     throw new Error(
       `Agent "${agent}" has no mode "${mode}". Available modes: ${known}.`
     );
+  }
+  const { model, effort } = options;
+  const extra = [];
+  if (model) {
+    if (!adapter.modelFlag) {
+      throw new Error(
+        `Agent "${agent}" has no "modelFlag", so it cannot take a model. ` +
+          `Add one to its adapter (e.g. "modelFlag": "--model").`
+      );
+    }
+    extra.push(...flagArgs(adapter.modelFlag, "{model}", model));
+  }
+  if (effort) {
+    if (!adapter.effortFlag) {
+      throw new Error(
+        `Agent "${agent}" has no "effortFlag", so it cannot take an effort. ` +
+          `Add one to its adapter (e.g. "effortFlag": "--effort").`
+      );
+    }
+    extra.push(...flagArgs(adapter.effortFlag, "{effort}", effort));
+  }
+  if (extra.length) {
+    const at = template.indexOf("{prompt}");
+    const insert = at === -1 ? template.length : at;
+    template = [...template.slice(0, insert), ...extra, ...template.slice(insert)];
   }
   return { bin: adapter.bin, args: substitute(template, prompt) };
 }

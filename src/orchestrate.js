@@ -111,7 +111,10 @@ export async function orchestrate({
     const prompt = buildTurnPrompt(roleName, def.persona || "", task, transcript);
     let invocation;
     try {
-      invocation = buildInvocation(def.agent, mode, prompt, adapters);
+      invocation = buildInvocation(def.agent, mode, prompt, adapters, {
+        model: def.model,
+        effort: def.effort,
+      });
     } catch (err) {
       write(`\n${err.message}\n`);
       transcript.push({ role: roleName, text: `[error] ${err.message}` });
@@ -121,12 +124,9 @@ export async function orchestrate({
 
     printHeader(roleName, def.agent, mode, color, write);
 
-    // Per-role model override (stretch): prepend if the adapter understands it.
-    const args = applyModelOverride(invocation.args, def.model);
-
     const res = await runner({
       bin: invocation.bin,
-      args,
+      args: invocation.args,
       cwd,
       timeout,
       onData: (chunk) => {
@@ -166,10 +166,4 @@ export async function orchestrate({
   const result = { transcript, verdict, reason, rounds };
   logger.finish(result); // write transcript.md + result.json for the main to review
   return result;
-}
-
-// Stretch: per-role model override. Built-ins all accept "--model <name>".
-function applyModelOverride(args, model) {
-  if (!model) return args;
-  return [...args, "--model", model];
 }

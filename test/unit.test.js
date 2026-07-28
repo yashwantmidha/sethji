@@ -41,6 +41,92 @@ test("buildInvocation rejects unknown mode", () => {
   assert.throws(() => buildInvocation("claude", "sideways", "x"), /no mode/);
 });
 
+test("buildInvocation injects the model before the prompt", () => {
+  const { args } = buildInvocation("codex", "write", "do it", undefined, { model: "o3" });
+  const flagAt = args.indexOf("--model");
+  assert.ok(flagAt !== -1, "model flag present");
+  assert.equal(args[flagAt + 1], "o3");
+  assert.ok(flagAt < args.indexOf("do it"), "model flag comes before the prompt");
+});
+
+test("buildInvocation injects a string effort flag (claude)", () => {
+  const { args } = buildInvocation("claude", "read", "hi", undefined, { effort: "high" });
+  const flagAt = args.indexOf("--effort");
+  assert.ok(flagAt !== -1);
+  assert.equal(args[flagAt + 1], "high");
+});
+
+test("buildInvocation expands an array effort template (codex)", () => {
+  const { args } = buildInvocation("codex", "write", "go", undefined, {
+    model: "o3",
+    effort: "high",
+  });
+  assert.ok(args.includes("-c"));
+  assert.ok(args.includes("model_reasoning_effort=high"));
+});
+
+test("buildInvocation without options adds no extra flags", () => {
+  const { args } = buildInvocation("claude", "read", "hi");
+  assert.ok(!args.includes("--model"));
+  assert.ok(!args.includes("--effort"));
+});
+
+test("buildInvocation rejects a model for an adapter with no modelFlag", () => {
+  const m = mergeAdapters({
+    local: { bin: "ollama", modes: { read: ["run", "x", "{prompt}"] } },
+  });
+  assert.throws(
+    () => buildInvocation("local", "read", "hi", m, { model: "llama3" }),
+    /no "modelFlag"/
+  );
+});
+
+test("buildInvocation rejects an effort for an adapter with no effortFlag", () => {
+  assert.throws(
+    () => buildInvocation("gemini", "read", "hi", undefined, { effort: "high" }),
+    /no "effortFlag"/
+  );
+});
+
+// --- createWorkBranch ------------------------------------------------------
+test("createWorkBranch makes a sethji/run-* branch, then declines to stack", async (t) => {
+  const { mkdtemp, rm, writeFile: wf } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const { createWorkBranch } = await import("../src/run.js");
+
+  const dir = await mkdtemp(join(tmpdir(), "sethji-branch-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await run("git", ["init", "-q"], { cwd: dir });
+  await run("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init", "-q"], { cwd: dir });
+
+  const name = await createWorkBranch(dir);
+  assert.match(name, /^sethji\/run-/);
+  const { stdout } = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: dir });
+  assert.equal(stdout.trim(), name);
+
+  // Already on a sethji/* branch: no new branch.
+  assert.equal(await createWorkBranch(dir), null);
+
+  // Works with a dirty tree too (uncommitted files ride along).
+  await run("git", ["checkout", "-q", "-"], { cwd: dir });
+  await wf(join(dir, "dirty.txt"), "x");
+  assert.match(await createWorkBranch(dir), /^sethji\/run-/);
+});
+
+test("createWorkBranch returns null outside a git repo", async (t) => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { createWorkBranch } = await import("../src/run.js");
+  const dir = await mkdtemp(join(tmpdir(), "sethji-nogit-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  assert.equal(await createWorkBranch(dir), null);
+});
+
 // --- mergeAdapters (the "which AIs do I have" roster) ----------------------
 test("mergeAdapters adds a custom agent with its own modes", () => {
   const m = mergeAdapters({

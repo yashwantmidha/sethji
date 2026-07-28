@@ -1,0 +1,14 @@
+{
+  "claude": {
+    "models": ["opus", "sonnet", "haiku"],
+    "efforts": ["low", "medium", "high"]
+  },
+  "codex": {
+    "models": ["gpt-5-codex", "gpt-5", "o3"],
+    "efforts": ["minimal", "low", "medium", "high"]
+  },
+  "gemini": {
+    "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+    "efforts": []
+  }
+}
