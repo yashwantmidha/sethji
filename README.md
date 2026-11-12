@@ -32,11 +32,18 @@ npx sethji ask claude "explain what this repo does" --mode read
 
 | Command | What it does |
 | --- | --- |
-| `sethji run "<task>"` | Drive the crew over a task. Flags: `--crew crew.json` `--cwd dir` `--no-color` `--timeout sec` `--json` |
+| `sethji run "<task>"` | Drive the crew over a task. Flags: `--crew crew.json` `--cwd dir` `--tmux` `--no-branch` `--no-color` `--timeout sec` `--json`, plus per-role overrides `--agent` `--model` `--effort` (`role=value,…`, or a bare value for every role that can take it) |
+| `sethji plan "<need>"` | An agent drafts a crew config for your need; you review it, then save and/or run. Flags: `--out crew.json` `--crew crew.json` `--cwd dir` `--timeout sec` |
 | `sethji ask <agent> "<prompt>"` | Run one agent once. Flags: `--mode read\|write\|yolo` `--cwd dir` `--crew crew.json` `--timeout sec` |
 | `sethji list [--crew crew.json]` | Show known agents (+ ones you declared) and whether each CLI is on your PATH |
-| `sethji init [--out crew.json]` | Write the default crew config to edit |
+| `sethji init [--out crew.json] [--force]` | Write the default crew config to edit. Refuses to overwrite an existing file without `--force` |
 | `sethji help` / `sethji version` | Help / version |
+
+`run` uses `./crew.json` when present, logs every run to `.sethji/runs/<stamp>/`
+(`transcript.md`, `result.json`, per-role logs), and in a git repo starts on a fresh
+`sethji/run-<stamp>` branch unless you pass `--no-branch`. `--tmux` opens one pane per role.
+It exits `0` on PASS and `1` on FAIL. Ctrl-C (or SIGTERM) stops the running agent too and
+still writes the logs.
 
 ## Modes (how much a delegated agent may touch)
 
@@ -70,10 +77,14 @@ npx sethji ask claude "explain what this repo does" --mode read
   model and reasoning effort for that role (passed via the adapter's `modelFlag` /
   `effortFlag`; built-in claude takes both, codex maps effort to
   `-c model_reasoning_effort=…`, gemini takes neither).
+  Role names may use only letters, digits, `_` and `-` (they become log file names).
 - **workflow** — the order roles run in.
 - **loop** — after `from` (QA) runs, its verdict is parsed. On `VERDICT: FAIL` with rounds
   left, control jumps back to `to` (coder) and continues. An **unknown or missing verdict
   counts as PASS**, so the loop can never spin forever.
+- **agent errors** — if any agent crashes, times out, is stopped, or its CLI is missing,
+  the run ends right there as **FAIL** with that error as the reason. A crew that did not
+  actually run never reports PASS.
 
 ### Personas
 
@@ -125,7 +136,8 @@ agents show with a `(custom)` tag and an installed/not-found status.
 #### Using a local model (ollama + qwen)
 
 ```bash
-ollama serve & ; ollama pull qwen2.5-coder      # install the model
+ollama serve &                                  # start the server
+ollama pull qwen2.5-coder                       # install the model
 sethji list --crew crew.json                    # confirm "ollama  installed"
 sethji run "add /health endpoint" --crew crew.json
 ```

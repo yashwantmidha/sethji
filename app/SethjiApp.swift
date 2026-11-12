@@ -291,7 +291,11 @@ final class SethjiRunner {
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return } // EOF; terminationHandler unhooks us
-            guard let s = String(data: data, encoding: .utf8) else { return }
+            // Lossy decode: a chunk that splits a multibyte char must not be
+            // dropped whole (String(data:encoding:) returns nil for it).
+            // ponytail: the split char itself renders as U+FFFD; carry the
+            // partial bytes over to the next chunk if that ever matters.
+            let s = String(decoding: data, as: UTF8.self)
             DispatchQueue.main.async { onChunk(s) }
         }
         p.terminationHandler = { proc in

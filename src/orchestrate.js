@@ -118,8 +118,9 @@ export async function orchestrate({
     } catch (err) {
       write(`\n${err.message}\n`);
       transcript.push({ role: roleName, text: `[error] ${err.message}` });
-      i++;
-      continue;
+      verdict = "FAIL";
+      reason = err.message;
+      break;
     }
 
     printHeader(roleName, def.agent, mode, color, write);
@@ -142,9 +143,17 @@ export async function orchestrate({
     }
     transcript.push({ role: roleName, text });
 
+    // An agent that crashed, timed out, or was stopped did no work: the run
+    // fails here. Carrying on would let a missing verdict read as PASS.
+    if (!res.ok) {
+      verdict = "FAIL";
+      reason = res.error;
+      break;
+    }
+
     // If this is the loop's "from" role, check the verdict and maybe jump back.
     if (loop && roleName === loop.from) {
-      const v = parseVerdict(res.ok ? res.stdout : "");
+      const v = parseVerdict(res.stdout);
       verdict = v.verdict;
       reason = v.reason;
       if (verdict === "FAIL" && rounds < maxRounds) {

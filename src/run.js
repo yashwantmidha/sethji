@@ -14,6 +14,10 @@ import { spawn } from "node:child_process";
 // orchestrator can keep going and show a friendly message.
 export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
   return new Promise((resolve) => {
+    if (stopping) {
+      resolve({ ok: false, stdout: "", stderr: "", code: null, error: "Run was stopped." });
+      return;
+    }
     let child;
     try {
       child = spawn(bin, args, { cwd, shell: false });
@@ -21,6 +25,10 @@ export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
       resolve(spawnFailure(bin, err));
       return;
     }
+    active.add(child);
+    // Decode as a stream so a multibyte char split across chunks stays intact.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
 
     let stdout = "";
     let stderr = "";
@@ -34,23 +42,24 @@ export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
       }, timeout);
     }
 
-    child.stdout.on("data", (buf) => {
-      const text = buf.toString();
+    child.stdout.on("data", (text) => {
       stdout += text;
       if (onData) onData(text);
     });
-    child.stderr.on("data", (buf) => {
-      stderr += buf.toString();
+    child.stderr.on("data", (text) => {
+      stderr += text;
     });
 
     // ENOENT etc. arrive as an "error" event, not a throw.
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
+      active.delete(child);
       resolve(spawnFailure(bin, err));
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (timer) clearTimeout(timer);
+      active.delete(child);
       if (timedOut) {
         resolve({
           ok: false,
@@ -69,12 +78,26 @@ export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
         error:
           code === 0
             ? null
-            : `Agent "${bin}" exited with code ${code}.${
-                stderr.trim() ? ` ${stderr.trim()}` : ""
-              }`,
+            : `Agent "${bin}" ${
+                signal ? `was stopped (${signal})` : `exited with code ${code}`
+              }.${stderr.trim() ? ` ${stderr.trim()}` : ""}`,
       });
     });
   });
+}
+
+// Children currently running, so a stop can take them down with us.
+const active = new Set();
+let stopping = false;
+
+// Stop the run: terminate every running agent and refuse to start new ones.
+// Without this, killing sethji orphans the agent CLI, which keeps editing files.
+// ponytail: SIGTERM to the direct child only; an agent that ignores it or has
+// its own grandchildren survives — spawn detached + kill the process group if
+// that shows up.
+export function stopAgents() {
+  stopping = true;
+  for (const child of active) child.kill("SIGTERM");
 }
 
 // Turn a spawn-time error into a friendly, actionable result.

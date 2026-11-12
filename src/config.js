@@ -71,6 +71,13 @@ export function validateCrew(crew) {
 
   // Every role used in the workflow must exist and be well-formed.
   for (const role of crew.workflow) {
+    // Role names become log file names and tmux pane commands, and crews can be
+    // drafted by a model — so no path separators, quotes, or shell syntax.
+    if (!/^[\w-]+$/.test(role)) {
+      throw new Error(
+        `Role name "${role}" is invalid — use only letters, digits, "_" and "-".`
+      );
+    }
     const def = crew.roles[role];
     if (!def) {
       throw new Error(`Workflow references unknown role "${role}".`);

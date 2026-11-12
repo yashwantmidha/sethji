@@ -3,18 +3,20 @@ import { writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { BUILTIN_ADAPTERS, mergeAdapters } from "../src/adapters.js";
-import { runAgent, isInstalled, createWorkBranch } from "../src/run.js";
+import { BUILTIN_ADAPTERS, mergeAdapters, buildInvocation } from "../src/adapters.js";
+import { runAgent, isInstalled, createWorkBranch, stopAgents } from "../src/run.js";
 import { DEFAULT_CREW, loadCrew, validateCrew } from "../src/config.js";
-import { buildInvocation } from "../src/adapters.js";
 import { orchestrate } from "../src/orchestrate.js";
 import { createRunDir, createLogger } from "../src/logs.js";
 import { isTmuxAvailable, startWatchWall } from "../src/tmux.js";
 import { generateCrew } from "../src/plan.js";
 
 // --- tiny flag parser ------------------------------------------------------
-// Splits argv into positionals + flags. Boolean flags: --no-color.
-// Value flags: --crew, --cwd, --timeout, --mode, --out, --json.
+// Splits argv into positionals + flags. Boolean flags never consume the next
+// argument, so `run --no-branch "task"` keeps its task. Everything else
+// (--crew, --cwd, --timeout, --mode, --out, --agent, --model, --effort) takes a value.
+const BOOLEAN_FLAGS = new Set(["json", "tmux", "no-branch", "force"]);
+
 function parseArgs(argv) {
   const positionals = [];
   const flags = {};
@@ -22,12 +24,10 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--no-color") {
       flags.color = false;
-    } else if (a === "--json") {
-      flags.json = true;
     } else if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith("--")) {
+      if (BOOLEAN_FLAGS.has(key) || next === undefined || next.startsWith("--")) {
         flags[key] = true;
       } else {
         flags[key] = next;
@@ -51,7 +51,7 @@ Usage:
   sethji plan "<what you need>" [--out crew.json] [--crew crew.json] [--cwd dir] [--timeout sec]
   sethji ask <agent> "<prompt>" [--mode read|write|yolo] [--cwd dir] [--crew crew.json] [--timeout sec]
   sethji list [--crew crew.json]       show known agents (+ your declared ones) and install status
-  sethji init [--out crew.json]        write the default crew config to edit
+  sethji init [--out crew.json] [--force]   write the default crew config to edit
   sethji help                          this message
   sethji version                       print version
 
@@ -126,7 +126,8 @@ async function cmdRun(positionals, flags) {
     fail('run needs a task. Example: sethji run "add a /health endpoint"\n(or run "sethji plan" first to draft a crew with a task).');
     return;
   }
-  const timeout = flags.timeout ? Number(flags.timeout) * 1000 : 0;
+  const timeout = timeoutMs(flags);
+  stopAgentsOnSignal();
 
   // Work on a fresh branch when possible so agent edits are easy to revert.
   // Skipped outside git repos, on sethji/* branches, or with --no-branch.
@@ -189,7 +190,7 @@ async function cmdPlan(positionals, flags) {
     const base = await loadCrew(flags.crew);
     adapters = mergeAdapters(base.agents || {}, BUILTIN_ADAPTERS);
   }
-  const timeout = flags.timeout ? Number(flags.timeout) * 1000 : 0;
+  const timeout = timeoutMs(flags);
 
   process.stdout.write("Drafting a crew for your need…\n");
   let crew;
@@ -213,15 +214,26 @@ async function cmdPlan(positionals, flags) {
       "\n"
   );
 
-  // Approve before saving/running. Default is No.
+  // Approve before saving/running. Default is No — nothing is written.
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = (await rl.question(`Save to ${out} and run now? [y/N] `)).trim().toLowerCase();
+  const warn = existsSync(out) ? ` (overwrites the existing ${out})` : "";
+  const answer = (
+    await rl.question(`Save to ${out}${warn}? [y = save & run / s = save only / N] `)
+  )
+    .trim()
+    .toLowerCase();
   rl.close();
+
+  const run = answer === "y" || answer === "yes";
+  if (!run && answer !== "s" && answer !== "save") {
+    process.stdout.write("Not saved.\n");
+    return;
+  }
 
   await writeFile(out, json + "\n", "utf8");
   process.stdout.write(`Saved ${out}.\n`);
 
-  if (answer === "y" || answer === "yes") {
+  if (run) {
     return cmdRun([need], { ...flags, crew: out });
   }
   process.stdout.write(`When ready: sethji run "<task>" --crew ${out}\n`);
@@ -248,7 +260,8 @@ async function cmdAsk(positionals, flags) {
     fail(err.message);
     return;
   }
-  const timeout = flags.timeout ? Number(flags.timeout) * 1000 : 0;
+  const timeout = timeoutMs(flags);
+  stopAgentsOnSignal();
   const res = await runAgent({
     bin: invocation.bin,
     args: invocation.args,
@@ -291,6 +304,10 @@ async function cmdList(flags) {
 // sethji init — write the default crew config
 async function cmdInit(flags) {
   const out = typeof flags.out === "string" ? flags.out : "crew.json";
+  if (existsSync(out) && !flags.force) {
+    fail(`${out} already exists. Use --force to overwrite it, or --out <file> to write elsewhere.`);
+    return;
+  }
   await writeFile(out, JSON.stringify(DEFAULT_CREW, null, 2) + "\n", "utf8");
   process.stdout.write(`Wrote default crew to ${out}. Edit it, then: sethji run "<task>" --crew ${out}\n`);
 }
@@ -349,6 +366,22 @@ function applyRoleOverrides(crew, flags) {
   const next = { ...crew, roles };
   validateCrew(next);
   return next;
+}
+
+// --timeout <seconds> as ms (0 = none). A typo must not silently mean "no timeout".
+function timeoutMs(flags) {
+  if (flags.timeout === undefined) return 0;
+  const sec = typeof flags.timeout === "string" ? Number(flags.timeout) : NaN;
+  if (!Number.isFinite(sec) || sec < 0) {
+    throw new Error(`--timeout needs a number of seconds, got "${flags.timeout}".`);
+  }
+  return sec * 1000;
+}
+
+// Ctrl-C, or the menu-bar app's Stop (SIGTERM), must take the running agent
+// down with us; the run then ends as FAIL and still writes its logs.
+function stopAgentsOnSignal() {
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, stopAgents);
 }
 
 function fail(msg) {
