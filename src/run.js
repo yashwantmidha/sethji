@@ -20,7 +20,9 @@ export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
     }
     let child;
     try {
-      child = spawn(bin, args, { cwd, shell: false });
+      // stdin is closed: the prompt travels in argv, and a CLI that sees an
+      // open stdin pipe (codex exec) waits on it forever.
+      child = spawn(bin, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
       resolve(spawnFailure(bin, err));
       return;

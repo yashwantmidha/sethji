@@ -45,6 +45,8 @@ const HELP = `sethji — run AI coding CLIs as a role-based crew (architect · c
 Usage:
   sethji run "<task>" [--crew crew.json] [--cwd dir] [--tmux] [--no-color] [--timeout sec] [--json]
              [--no-branch]  runs on a fresh sethji/run-<stamp> git branch by default
+             [--check "npm test"]  run this command before QA; a non-zero exit is a
+             FAIL that loops back to the coder with the output (or "check" in crew.json)
              [--agent role=cli,…] [--model role=name,…] [--effort role=level,…]
              per-role overrides; a bare value ("--model opus") applies to every
              role that can take it
@@ -115,6 +117,15 @@ async function cmdRun(positionals, flags) {
 
   try {
     crew = applyRoleOverrides(crew, flags);
+    if (flags.check !== undefined) {
+      if (typeof flags.check !== "string") {
+        throw new Error('--check needs a command. Example: --check "npm test"');
+      }
+      // ponytail: split on whitespace, no quoting — for arguments containing
+      // spaces, set "check" as an array in crew.json instead.
+      crew = { ...crew, check: flags.check.trim().split(/\s+/) };
+      validateCrew(crew);
+    }
   } catch (err) {
     fail(err.message);
     return;

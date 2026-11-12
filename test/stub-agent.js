@@ -31,6 +31,10 @@ if (kind === "split") {
   const bytes = Buffer.from("✓ ok\n");
   process.stdout.write(bytes.subarray(0, 2));
   setTimeout(() => process.stdout.write(bytes.subarray(2)), 50);
+} else if (kind === "stdin") {
+  // Like `codex exec`: wait for stdin to end before answering.
+  process.stdin.resume();
+  process.stdin.on("end", () => process.stdout.write("stdin closed\n"));
 } else if (kind === "hang") {
   // Announce our pid, then never finish — for stop/signal tests.
   process.stdout.write(`PID ${process.pid}\n`);

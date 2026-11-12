@@ -187,3 +187,76 @@ test("cli run: SIGTERM stops the agent child and still writes the run log", asyn
   const result = JSON.parse(await readFile(join(runs, stamp, "result.json"), "utf8"));
   assert.equal(result.verdict, "FAIL");
 });
+
+// --- check: QA backed by a real command ------------------------------------
+const quiet = { color: false, write: () => {} };
+const roles = (result) => result.transcript.map((x) => x.role);
+
+test("check passes: its output reaches QA, verdict stays QA's", async () => {
+  const crew = { ...stubCrew("code", "pass"), check: [NODE, STUB, "plan"] };
+  const result = await orchestrate({ task: "t", crew, ...quiet });
+  assert.equal(result.verdict, "PASS");
+  assert.deepEqual(roles(result), ["coder", "check", "qa"]);
+  assert.match(result.transcript[1].text, /PLAN:[\s\S]*\[exit 0\]/);
+});
+
+test("check fails: loops back to the coder without asking QA, ends FAIL", async () => {
+  const crew = { ...stubCrew("code", "pass"), check: [NODE, STUB, "boom"] };
+  const result = await orchestrate({ task: "t", crew, ...quiet });
+  assert.equal(result.verdict, "FAIL");
+  assert.match(result.reason, /check failed/);
+  assert.equal(result.rounds, 1);
+  // QA said PASS in the stub — a failing check must override it by never asking.
+  assert.deepEqual(roles(result), ["coder", "check", "coder", "check"]);
+  assert.match(result.transcript[1].text, /stub failure[\s\S]*\[exit 3\]/);
+});
+
+test("check without a loop runs once at the end and gates the verdict", async () => {
+  const crew = { ...stubCrew("code", "pass"), check: [NODE, STUB, "boom"] };
+  delete crew.loop;
+  const result = await orchestrate({ task: "t", crew, ...quiet });
+  assert.equal(result.verdict, "FAIL");
+  assert.deepEqual(roles(result), ["coder", "qa", "check"]);
+});
+
+test("check command that cannot start fails the run without looping", async () => {
+  const crew = { ...stubCrew("code", "pass"), check: ["definitely-not-a-real-bin-xyz"] };
+  const result = await orchestrate({ task: "t", crew, ...quiet });
+  assert.equal(result.verdict, "FAIL");
+  assert.equal(result.rounds, 0);
+  assert.match(result.reason, /not found on PATH/);
+  assert.deepEqual(roles(result), ["coder", "check"]);
+});
+
+test("validateCrew rejects a check that is not an argv array", () => {
+  for (const bad of ["npm test", [], ["npm", 5], [""]]) {
+    const crew = { ...stubCrew("code", "pass"), check: bad };
+    assert.throws(() => validateCrew(crew), /"check"/, JSON.stringify(bad));
+  }
+});
+
+test("cli run --check: a failing command exits 1", async (t) => {
+  const dir = await project(t, stubCrew("code", "pass"));
+  const res = await cli(
+    ["run", "task", "--no-branch", "--no-color", "--check", `${NODE} ${STUB} boom`],
+    { cwd: dir }
+  );
+  assert.equal(res.code, 1);
+  assert.match(res.stdout, /▌ CHECK/);
+  assert.match(res.stdout, /✗ FAIL.*check failed/);
+});
+
+// --- stdin ----------------------------------------------------------------
+test("runAgent gives the child a closed stdin (codex exec waits on an open one)", async () => {
+  const res = await runAgent({ bin: NODE, args: [STUB, "stdin"], timeout: 3000 });
+  assert.equal(res.ok, true, res.error);
+  assert.equal(res.stdout, "stdin closed");
+});
+
+test("cli run: --check without a command is an error, not a run", async (t) => {
+  const dir = await project(t, stubCrew("code", "pass"));
+  const res = await cli(["run", "task", "--no-branch", "--check"], { cwd: dir });
+  assert.equal(res.code, 1);
+  assert.match(res.stderr, /--check needs a command/);
+  assert.equal(existsSync(join(dir, ".sethji")), false);
+});

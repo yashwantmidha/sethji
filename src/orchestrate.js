@@ -66,6 +66,9 @@ function hashish(s) {
   return h;
 }
 
+// How much check output to keep in the transcript (chars, from the end).
+const CHECK_OUTPUT_MAX = 8000;
+
 // Run the whole crew over a task.
 //
 // opts:
@@ -100,10 +103,70 @@ export async function orchestrate({
   let verdict = "PASS";
   let reason = "";
 
+  // Count a loop round, announce it, and return the index to resume from.
+  const loopBack = () => {
+    rounds++;
+    const noteMsg = `↻ QA failed (round ${rounds}/${maxRounds}): ${
+      reason || "no reason given"
+    } — looping back to ${loop.to}.`;
+    write(`\n${color ? ANSI.dim : ""}${noteMsg}${color ? ANSI.reset : ""}\n`);
+    logger.note(noteMsg);
+    return crew.workflow.indexOf(loop.to);
+  };
+
+  // Run the crew's "check" command (e.g. ["npm", "test"]) so the verdict rests
+  // on a real result, not only on QA reading the code. The output joins the
+  // transcript as a CHECK turn for QA and the coder to read.
+  // Returns "pass", "fail" (ran, non-zero exit) or "error" (never produced an
+  // exit code: missing, timed out, stopped). Sets verdict/reason unless "pass".
+  const runCheck = async () => {
+    const [bin, ...args] = crew.check;
+    const label = crew.check.join(" ");
+    printHeader("check", label, "run", color, write);
+    const emit = (chunk) => {
+      write(chunk);
+      logger.roleChunk("check", chunk);
+    };
+    const res = await runner({ bin, args, cwd, timeout, onData: emit });
+    // Test runners often report on stderr; it is not streamed, so show it now.
+    if (res.stderr) emit(`\n${res.stderr}\n`);
+
+    if (typeof res.code !== "number") {
+      emit(`\n[error] ${res.error}\n`);
+      transcript.push({ role: "check", text: `[error] ${res.error}` });
+      verdict = "FAIL";
+      reason = res.error;
+      return "error";
+    }
+    const output = [res.stdout, res.stderr].filter(Boolean).join("\n");
+    // Failures print last, so keep the tail; the transcript is re-sent every turn.
+    const shown =
+      output.length > CHECK_OUTPUT_MAX
+        ? `…(earlier output trimmed)\n${output.slice(-CHECK_OUTPUT_MAX)}`
+        : output;
+    transcript.push({ role: "check", text: `$ ${label}\n${shown}\n[exit ${res.code}]` });
+    if (res.code === 0) return "pass";
+    verdict = "FAIL";
+    reason = `check failed: "${label}" exited with code ${res.code}`;
+    return "fail";
+  };
+
   // We walk the workflow by index so the loop can jump back to loop.to.
   let i = 0;
   while (i < crew.workflow.length) {
     const roleName = crew.workflow[i];
+
+    // The check runs right before the reviewing role. A failing check is the
+    // verdict: QA is not asked, and the coder gets the output as feedback.
+    if (crew.check && loop && roleName === loop.from) {
+      const outcome = await runCheck();
+      if (outcome === "fail" && rounds < maxRounds) {
+        i = loopBack();
+        continue;
+      }
+      if (outcome !== "pass") break;
+    }
+
     const def = crew.roles[roleName];
     const mode = def.mode || "read";
 
@@ -157,20 +220,16 @@ export async function orchestrate({
       verdict = v.verdict;
       reason = v.reason;
       if (verdict === "FAIL" && rounds < maxRounds) {
-        rounds++;
-        const backTo = crew.workflow.indexOf(loop.to);
-        const noteMsg = `↻ QA failed (round ${rounds}/${maxRounds}): ${
-          reason || "no reason given"
-        } — looping back to ${loop.to}.`;
-        write(`\n${color ? ANSI.dim : ""}${noteMsg}${color ? ANSI.reset : ""}\n`);
-        logger.note(noteMsg);
-        i = backTo;
+        i = loopBack();
         continue;
       }
     }
 
     i++;
   }
+
+  // No loop to hang the check on: run it once after the last role.
+  if (crew.check && !loop && verdict === "PASS") await runCheck();
 
   const result = { transcript, verdict, reason, rounds };
   logger.finish(result); // write transcript.md + result.json for the main to review

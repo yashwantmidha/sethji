@@ -32,7 +32,7 @@ npx sethji ask claude "explain what this repo does" --mode read
 
 | Command | What it does |
 | --- | --- |
-| `sethji run "<task>"` | Drive the crew over a task. Flags: `--crew crew.json` `--cwd dir` `--tmux` `--no-branch` `--no-color` `--timeout sec` `--json`, plus per-role overrides `--agent` `--model` `--effort` (`role=value,…`, or a bare value for every role that can take it) |
+| `sethji run "<task>"` | Drive the crew over a task. Flags: `--crew crew.json` `--cwd dir` `--tmux` `--no-branch` `--check "cmd"` `--no-color` `--timeout sec` `--json`, plus per-role overrides `--agent` `--model` `--effort` (`role=value,…`, or a bare value for every role that can take it) |
 | `sethji plan "<need>"` | An agent drafts a crew config for your need; you review it, then save and/or run. Flags: `--out crew.json` `--crew crew.json` `--cwd dir` `--timeout sec` |
 | `sethji ask <agent> "<prompt>"` | Run one agent once. Flags: `--mode read\|write\|yolo` `--cwd dir` `--crew crew.json` `--timeout sec` |
 | `sethji list [--crew crew.json]` | Show known agents (+ ones you declared) and whether each CLI is on your PATH |
@@ -82,6 +82,13 @@ still writes the logs.
 - **loop** — after `from` (QA) runs, its verdict is parsed. On `VERDICT: FAIL` with rounds
   left, control jumps back to `to` (coder) and continues. An **unknown or missing verdict
   counts as PASS**, so the loop can never spin forever.
+- **check** (optional) — a real command that backs the verdict, as an argv array (no
+  shell), e.g. `"check": ["npm", "test"]`, or per run with `--check "npm test"`. It runs
+  right before the `loop.from` role (or once after the last role when there is no loop)
+  and its output joins the transcript as a `CHECK` turn. Exit `0`: QA reviews as usual,
+  now with the real output in front of it. Non-zero: the run is **FAIL** without asking
+  QA, and with rounds left the coder gets the output as feedback. A check that cannot
+  start or times out ends the run.
 - **agent errors** — if any agent crashes, times out, is stopped, or its CLI is missing,
   the run ends right there as **FAIL** with that error as the reason. A crew that did not
   actually run never reports PASS.

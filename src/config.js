@@ -110,6 +110,19 @@ export function validateCrew(crew) {
     }
   }
 
+  // The optional check is an argv array (no shell), like an adapter's modes.
+  if (crew.check !== undefined) {
+    const ok =
+      Array.isArray(crew.check) &&
+      crew.check.length > 0 &&
+      crew.check.every((a) => typeof a === "string" && a);
+    if (!ok) {
+      throw new Error(
+        'Crew config "check" must be a non-empty array of strings, e.g. ["npm", "test"].'
+      );
+    }
+  }
+
   // The loop is optional, but if present it must point at real workflow roles.
   if (crew.loop) {
     const { from, to } = crew.loop;
