@@ -260,3 +260,212 @@ test("cli run: --check without a command is an error, not a run", async (t) => {
   assert.match(res.stderr, /--check needs a command/);
   assert.equal(existsSync(join(dir, ".sethji")), false);
 });
+
+// --- --check quoting -------------------------------------------------------
+test("cli run --check: quoted arguments stay one argv element", async (t) => {
+  const dir = await project(t, stubCrew("code", "pass"));
+  const check = `${NODE} -e "console.log('a  b'); process.exit(7)"`;
+  const res = await cli(["run", "task", "--no-branch", "--no-color", "--check", check], { cwd: dir });
+  assert.equal(res.code, 1);
+  assert.match(res.stdout, /a  b/);
+  assert.match(res.stdout, /exited with code 7/);
+});
+
+test("cli run --check: an unclosed quote is rejected", async (t) => {
+  const dir = await project(t, stubCrew("code", "pass"));
+  const res = await cli(["run", "task", "--no-branch", "--check", 'npm "test'], { cwd: dir });
+  assert.equal(res.code, 1);
+  assert.match(res.stderr, /unclosed/);
+});
+
+// --- plan drafts a check ---------------------------------------------------
+test("plan prompt asks the drafter for a check command", async () => {
+  const { buildPlanPrompt } = await import("../src/plan.js");
+  assert.match(buildPlanPrompt("need", "claude"), /check \(optional\)/);
+});
+
+test("generateCrew keeps a drafted check and rejects a malformed one", async () => {
+  const { generateCrew } = await import("../src/plan.js");
+  const draft = (check) => async () => ({
+    ok: true,
+    stdout: JSON.stringify({
+      roles: { solo: { agent: "claude", mode: "read", persona: "p" } },
+      workflow: ["solo"],
+      check,
+    }),
+  });
+  const crew = await generateCrew("x", { runner: draft(["npm", "test"]) });
+  assert.deepEqual(crew.check, ["npm", "test"]);
+  await assert.rejects(() => generateCrew("x", { runner: draft("npm test") }), /"check"/);
+});
+
+test("cli plan: shows the drafted check before asking to save", async (t) => {
+  const base = {
+    agents: { claude: stubAdapter("draft") },
+    roles: { solo: { agent: "claude", mode: "read", persona: "p" } },
+    workflow: ["solo"],
+  };
+  const dir = await project(t);
+  await writeFile(join(dir, "base.json"), JSON.stringify(base));
+  const res = await cli(["plan", "a need", "--crew", "base.json", "--out", "out.json"], {
+    cwd: dir,
+    stdin: "s\n",
+  });
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /Check: npm test/);
+  const saved = JSON.parse(await readFile(join(dir, "out.json"), "utf8"));
+  assert.deepEqual(saved.check, ["npm", "test"]);
+});
+
+// --- built-in ollama (local models) ----------------------------------------
+test("ollama: model goes between `run` and the prompt", async () => {
+  const { buildInvocation } = await import("../src/adapters.js");
+  const { bin, args } = buildInvocation("ollama", "read", "hi there", undefined, {
+    model: "qwen2.5-coder",
+  });
+  assert.equal(bin, "ollama");
+  assert.deepEqual(args, ["run", "--nowordwrap", "qwen2.5-coder", "hi there"]);
+});
+
+test("ollama: a model is required, and survives a bin override", async () => {
+  const { buildInvocation, mergeAdapters } = await import("../src/adapters.js");
+  assert.throws(() => buildInvocation("ollama", "read", "hi"), /needs a model/);
+  const merged = mergeAdapters({ ollama: { bin: "/opt/ollama" } });
+  assert.throws(() => buildInvocation("ollama", "read", "hi", merged), /needs a model/);
+});
+
+test("validateCrew: ollama role may omit the model but cannot be a writer", () => {
+  const crew = (role) => ({ roles: { solo: { agent: "ollama", persona: "p", ...role } }, workflow: ["solo"] });
+  assert.equal(validateCrew(crew({ model: "llama3.2" })), true);
+  assert.equal(validateCrew(crew({})), true); // no model: the default is resolved at run time
+  assert.throws(() => validateCrew(crew({ model: "llama3.2", mode: "write" })), /no mode "write"/);
+});
+
+test("cli ask --model reaches the agent", async (t) => {
+  // Positional model like ollama's: argv becomes [stub, <model>, <prompt>],
+  // so the stub's "kind" is whatever --model says.
+  const crew = stubCrew("code", "pass");
+  crew.agents.bot = { bin: NODE, modelFlag: ["{model}"], modes: { read: [STUB, "{prompt}"] } };
+  const dir = await project(t, crew);
+  const res = await cli(["ask", "bot", "hello", "--crew", "crew.json", "--model", "plan"], { cwd: dir });
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /^PLAN:/);
+});
+
+// --- model preflight (ollama would silently download a missing model) ------
+// An agent whose "modelCheck" is the stub: model "pass" exits 0, "boom" exits 3.
+function checkedCrew(model) {
+  return {
+    agents: {
+      local: {
+        bin: NODE,
+        modelFlag: ["{model}"],
+        modelCheck: [STUB, "{model}"],
+        modes: { read: [STUB, "{prompt}"] },
+      },
+    },
+    roles: { solo: { agent: "local", mode: "read", model, persona: "p" } },
+    workflow: ["solo"],
+  };
+}
+
+test("orchestrate: a model the agent does not have fails before any role runs", async () => {
+  const result = await orchestrate({ task: "t", crew: checkedCrew("boom"), ...quiet });
+  assert.equal(result.verdict, "FAIL");
+  assert.match(result.reason, /does not have model "boom"/);
+  assert.deepEqual(result.transcript, []);
+});
+
+test("orchestrate: a model that passes its check runs normally", async () => {
+  const result = await orchestrate({ task: "t", crew: checkedCrew("pass"), ...quiet });
+  assert.equal(result.verdict, "PASS");
+  assert.deepEqual(roles(result), ["solo"]);
+});
+
+test("cli ask: a missing model is refused, not run", async (t) => {
+  const dir = await project(t, checkedCrew("pass"));
+  const res = await cli(["ask", "local", "hi", "--crew", "crew.json", "--model", "boom"], { cwd: dir });
+  assert.equal(res.code, 1);
+  assert.match(res.stderr, /does not have model "boom"/);
+});
+
+test("built-in ollama checks the model with `ollama show`", async () => {
+  const { BUILTIN_ADAPTERS, mergeAdapters } = await import("../src/adapters.js");
+  assert.deepEqual(BUILTIN_ADAPTERS.ollama.modelCheck, ["show", "{model}"]);
+  assert.deepEqual(mergeAdapters({ ollama: { bin: "/x" } }).ollama.modelCheck, ["show", "{model}"]);
+});
+
+// --- default model ---------------------------------------------------------
+// An agent like ollama: needs a model, and can list the ones it has. The stub's
+// "models" listing names "pass" first, so the default model is "pass".
+function listingCrew(listKind) {
+  return {
+    agents: {
+      local: {
+        bin: NODE,
+        modelFlag: ["{model}"],
+        requiresModel: true,
+        listModels: [STUB, listKind],
+        modes: { read: [STUB, "{prompt}"] },
+      },
+    },
+    roles: { solo: { agent: "local", mode: "read", persona: "p" } },
+    workflow: ["solo"],
+  };
+}
+
+test("orchestrate: a role with no model uses the agent's first installed one", async () => {
+  let out = "";
+  const result = await orchestrate({
+    task: "t",
+    crew: listingCrew("models"),
+    color: false,
+    write: (s) => (out += s),
+  });
+  assert.equal(result.verdict, "PASS");
+  assert.match(result.transcript[0].text, /VERDICT: PASS/); // ran as model "pass"
+  assert.match(out, /using .*pass/);
+});
+
+test("orchestrate: no model set and none installed fails before any role runs", async () => {
+  const result = await orchestrate({ task: "t", crew: listingCrew("nomodels"), ...quiet });
+  assert.equal(result.verdict, "FAIL");
+  assert.match(result.reason, /no model/i);
+  assert.deepEqual(result.transcript, []);
+});
+
+test("cli ask: no --model falls back to the default model", async (t) => {
+  const dir = await project(t, listingCrew("models"));
+  const res = await cli(["ask", "local", "hi", "--crew", "crew.json"], { cwd: dir });
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /VERDICT: PASS/);
+});
+
+test("cli models: lists what the agent has installed, default first", async (t) => {
+  const dir = await project(t, listingCrew("models"));
+  const res = await cli(["models", "local", "--crew", "crew.json"], { cwd: dir });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stdout, "pass\ncode\n");
+
+  const cannot = await cli(["models", "claude"], { cwd: dir });
+  assert.equal(cannot.code, 1);
+});
+
+// --- per-role mode override -------------------------------------------------
+test("cli run --mode: sets a role's mode, and validation still applies", async (t) => {
+  // The stub agents only offer "read", so a write override must be refused —
+  // which also proves the flag reached the role.
+  const dir = await project(t, stubCrew("code", "pass"));
+  const base = ["run", "task", "--no-branch", "--no-color"];
+
+  const ok = await cli([...base, "--mode", "coder=read"], { cwd: dir });
+  assert.equal(ok.code, 0, ok.stderr);
+
+  const refused = await cli([...base, "--mode", "coder=write"], { cwd: dir });
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /Role "coder" wants mode "write"/);
+
+  const bogus = await cli([...base, "--mode", "coder=sideways"], { cwd: dir });
+  assert.equal(bogus.code, 1);
+  assert.match(bogus.stderr, /invalid mode/);
+});

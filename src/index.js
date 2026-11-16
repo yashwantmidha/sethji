@@ -1,6 +1,6 @@
 // Public API barrel.
 export { BUILTIN_ADAPTERS, MODES, buildInvocation, mergeAdapters } from "./adapters.js";
-export { runAgent, isInstalled, stopAgents } from "./run.js";
+export { runAgent, isInstalled, stopAgents, modelProblem, defaultModel, installedModels } from "./run.js";
 export { DEFAULT_CREW, loadCrew, validateCrew } from "./config.js";
 export { orchestrate, parseVerdict } from "./orchestrate.js";
 export { createRunDir, createLogger, NULL_LOGGER } from "./logs.js";

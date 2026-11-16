@@ -35,6 +35,10 @@ if (kind === "split") {
   // Like `codex exec`: wait for stdin to end before answering.
   process.stdin.resume();
   process.stdin.on("end", () => process.stdout.write("stdin closed\n"));
+} else if (kind === "models" || kind === "nomodels") {
+  // Shaped like `ollama list`: a header row, then one model per line.
+  process.stdout.write("NAME    ID    SIZE\n");
+  if (kind === "models") process.stdout.write("pass    aaa   1 GB\ncode    bbb   2 GB\n");
 } else if (kind === "hang") {
   // Announce our pid, then never finish — for stop/signal tests.
   process.stdout.write(`PID ${process.pid}\n`);
@@ -45,6 +49,7 @@ if (kind === "split") {
     JSON.stringify({
       roles: { solo: { agent: "claude", mode: "read", persona: "p" } },
       workflow: ["solo"],
+      check: ["npm", "test"],
     }) + "\n"
   );
 } else {

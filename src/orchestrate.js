@@ -1,5 +1,5 @@
 import { buildInvocation, BUILTIN_ADAPTERS, mergeAdapters } from "./adapters.js";
-import { runAgent } from "./run.js";
+import { runAgent, modelProblem, defaultModel } from "./run.js";
 import { NULL_LOGGER } from "./logs.js";
 
 // Raw ANSI colors (no chalk). One per role header, cycled.
@@ -151,6 +151,38 @@ export async function orchestrate({
     return "fail";
   };
 
+  // Before anything runs, settle every role's model. A role with none, on an
+  // agent that needs one, gets that agent's default. And each model must
+  // already be installed, or an agent like ollama would start a silent
+  // multi-GB download mid-run.
+  const roles = { ...crew.roles };
+  const defaults = new Map(); // agent -> its default model, looked up once
+  for (const roleName of new Set(crew.workflow)) {
+    const def = roles[roleName];
+    const adapter = adapters[def.agent];
+    if (!adapter) continue; // reported as an unknown agent when the role runs
+    let problem = null;
+    try {
+      if (adapter.requiresModel && !def.model) {
+        if (!defaults.has(def.agent)) {
+          defaults.set(def.agent, await defaultModel(def.agent, adapter, runner));
+        }
+        const model = defaults.get(def.agent);
+        roles[roleName] = { ...def, model };
+        write(`${roleName}: no model set, using ${def.agent} default ${model}.\n`);
+      }
+      problem = await modelProblem(def.agent, adapter, roles[roleName].model, runner);
+    } catch (err) {
+      problem = err.message;
+    }
+    if (problem) {
+      write(`\n${problem}\n`);
+      const result = { transcript, verdict: "FAIL", reason: problem, rounds };
+      logger.finish(result);
+      return result;
+    }
+  }
+
   // We walk the workflow by index so the loop can jump back to loop.to.
   let i = 0;
   while (i < crew.workflow.length) {
@@ -167,7 +199,7 @@ export async function orchestrate({
       if (outcome !== "pass") break;
     }
 
-    const def = crew.roles[roleName];
+    const def = roles[roleName];
     const mode = def.mode || "read";
 
     // Build this turn's prompt and the concrete CLI invocation.

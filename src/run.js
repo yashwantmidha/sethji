@@ -88,6 +88,49 @@ export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
   });
 }
 
+// The models an agent has installed, via its "listModels" command (ollama:
+// `list`), which prints a header row then one model per line, name first.
+// Empty when the agent cannot list models or the command fails.
+export async function installedModels(adapter, runner = runAgent) {
+  if (!adapter.listModels) return [];
+  const res = await runner({ bin: adapter.bin, args: adapter.listModels, timeout: 30000 });
+  if (!res.ok) return [];
+  return res.stdout
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter(Boolean);
+}
+
+// The model to use when a role names none, for agents that cannot run without
+// one (ollama): the first model the agent's "listModels" command prints — a
+// header row, then one model per line, name first. Throws if there is none.
+export async function defaultModel(agent, adapter, runner = runAgent) {
+  const [first] = await installedModels(adapter, runner);
+  if (!first) {
+    throw new Error(
+      `Agent "${agent}" was given no model and has none installed to default to. ` +
+        `Install one (for ollama: ollama pull qwen2.5-coder) or set a model.`
+    );
+  }
+  return first;
+}
+
+// Preflight for agents with a "modelCheck" argv template (ollama: `show
+// {model}`): does the agent actually have this model? Returns null when fine
+// or when there is nothing to check, else a message saying what is missing.
+export async function modelProblem(agent, adapter, model, runner = runAgent) {
+  if (!adapter.modelCheck || !model) return null;
+  const args = adapter.modelCheck.map((a) => a.split("{model}").join(model));
+  const res = await runner({ bin: adapter.bin, args, timeout: 30000 });
+  if (res.ok) return null;
+  return (
+    `Agent "${agent}" does not have model "${model}" ` +
+    `(checked with: ${[adapter.bin, ...args].join(" ")}). ` +
+    `Install it first — for ollama: ollama pull ${model}. ${res.error}`
+  );
+}
+
 // Children currently running, so a stop can take them down with us.
 const active = new Set();
 let stopping = false;

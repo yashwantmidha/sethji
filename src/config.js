@@ -96,6 +96,15 @@ export function validateCrew(crew) {
         `Role "${role}" has invalid mode "${def.mode}". Use one of: ${MODES.join(", ")}.`
       );
     }
+    // Catch a mode the agent cannot do (e.g. a text-only local model asked to
+    // write) before any agent has run, not halfway through the workflow.
+    const mode = def.mode || "read";
+    if (!adapters[def.agent].modes[mode]) {
+      throw new Error(
+        `Role "${role}" wants mode "${mode}", but agent "${def.agent}" has no mode "${mode}". ` +
+          `Available modes: ${Object.keys(adapters[def.agent].modes).join(", ")}.`
+      );
+    }
     for (const [field, flag] of [["model", "modelFlag"], ["effort", "effortFlag"]]) {
       const value = def[field];
       if (value !== undefined && (typeof value !== "string" || !value)) {

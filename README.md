@@ -32,7 +32,7 @@ npx sethji ask claude "explain what this repo does" --mode read
 
 | Command | What it does |
 | --- | --- |
-| `sethji run "<task>"` | Drive the crew over a task. Flags: `--crew crew.json` `--cwd dir` `--tmux` `--no-branch` `--check "cmd"` `--no-color` `--timeout sec` `--json`, plus per-role overrides `--agent` `--model` `--effort` (`role=value,…`, or a bare value for every role that can take it) |
+| `sethji run "<task>"` | Drive the crew over a task. Flags: `--crew crew.json` `--cwd dir` `--tmux` `--no-branch` `--check "cmd"` `--no-color` `--timeout sec` `--json`, plus per-role overrides `--agent` `--mode` `--model` `--effort` (`role=value,…`, or a bare value for every role that can take it) |
 | `sethji plan "<need>"` | An agent drafts a crew config for your need; you review it, then save and/or run. Flags: `--out crew.json` `--crew crew.json` `--cwd dir` `--timeout sec` |
 | `sethji ask <agent> "<prompt>"` | Run one agent once. Flags: `--mode read\|write\|yolo` `--cwd dir` `--crew crew.json` `--timeout sec` |
 | `sethji list [--crew crew.json]` | Show known agents (+ ones you declared) and whether each CLI is on your PATH |
@@ -83,7 +83,9 @@ still writes the logs.
   left, control jumps back to `to` (coder) and continues. An **unknown or missing verdict
   counts as PASS**, so the loop can never spin forever.
 - **check** (optional) — a real command that backs the verdict, as an argv array (no
-  shell), e.g. `"check": ["npm", "test"]`, or per run with `--check "npm test"`. It runs
+  shell), e.g. `"check": ["npm", "test"]`, or per run with `--check "npm test"` (quotes
+  group arguments; nothing else is interpreted). `sethji plan` drafts one when it finds
+  the project's test command, and shows it before you approve. It runs
   right before the `loop.from` role (or once after the last role when there is no loop)
   and its output joins the transcript as a `CHECK` turn. Exit `0`: QA reviews as usual,
   now with the real output in front of it. Non-zero: the run is **FAIL** without asking
@@ -142,12 +144,27 @@ agents show with a `(custom)` tag and an installed/not-found status.
 
 #### Using a local model (ollama + qwen)
 
+`ollama` is a built-in agent, so no roster entry is needed. It is text-only (mode `read`).
+A role that names no model uses the first one `ollama list` shows (the most recently
+pulled); sethji prints which one it picked.
+
+> **Pull the model first.** `ollama run` downloads a model it does not have, silently and
+> several GB at a time. sethji checks with `ollama show <model>` before a run and refuses
+> to start one: you get `ollama pull <model>` as the fix instead of a hung-looking agent.
+> Custom agents can opt in with `"modelCheck": ["show", "{model}"]` (any argv template
+> that exits non-zero when the model is missing).
+
 ```bash
 ollama serve &                                  # start the server
 ollama pull qwen2.5-coder                       # install the model
-sethji list --crew crew.json                    # confirm "ollama  installed"
-sethji run "add /health endpoint" --crew crew.json
+sethji list                                     # confirm "ollama  installed"
+sethji ask ollama "explain this error" --model qwen2.5-coder
+sethji run "add /health endpoint" --agent qa=ollama --model qa=qwen2.5-coder
 ```
+
+Or in `crew.json`: `"qa": { "agent": "ollama", "model": "qwen2.5-coder", "mode": "read", "persona": "..." }`.
+Giving an ollama role `write` or `yolo` is rejected up front. The roster example above is
+still the way to wrap a local model differently (other flags, another runner).
 
 > **How collaboration actually works.** sethji is an *orchestrator*, not a router — it does
 > not make Claude internally call qwen. It runs each CLI as a **separate child process** and
@@ -178,9 +195,12 @@ banner — plus a notification when the run ends. `Logs` opens `.sethji/runs/` f
 that folder. If `./crew.json` exists in the chosen folder it is used automatically
 (and drawn as the pipeline), exactly like the CLI. **⚙ Crew setup** expands a
 per-role row — pick the AI (built-ins plus any agents declared in `crew.json`),
-a model (dropdown of suggestions, free text allowed), and an effort level.
+a model (dropdown of suggestions, free text allowed), an effort level, and a mode (`read` / `write` / `yolo`), plus
+a **CHECK** field for the command that must pass (e.g. `npm test`; empty uses the
+`check` from `crew.json`, if any). With a check set, a `CHECK` chip joins the
+pipeline right before the reviewing role and turns red when the command fails.
 Overrides are remembered per project folder and passed to the CLI as
-`--agent`/`--model`/`--effort role=value,…` flags. The dropdown suggestions come
+`--agent`/`--mode`/`--model`/`--effort role=value,…` and `--check` flags. The dropdown suggestions come
 from `models.json` in the app bundle; put your own list at
 `~/.config/sethji/models.json` to override it.
 
