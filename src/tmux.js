@@ -33,16 +33,17 @@ export async function startWatchWall(session, roles, dir) {
   // Replace any stale session of the same name from a previous run.
   await tmux(["kill-session", "-t", session]);
 
-  // Show a role name above each pane so the wall is readable.
-  await tmux(["set-option", "-t", session, "-g", "pane-border-status", "top"]);
-  await tmux(["set-option", "-t", session, "-g", "pane-border-format", " #T "]);
-
   const first = roles[0];
   const created = await tmux([
     "new-session", "-d", "-s", session, "-n", "crew",
     `tail -f "${roleLogPath(dir, first)}"`,
   ]);
   if (!created.ok) return { ok: false };
+
+  // Show a role name above each pane so the wall is readable. Set after the
+  // session exists — before it, there may be no tmux server to talk to.
+  await tmux(["set-option", "-t", session, "-g", "pane-border-status", "top"]);
+  await tmux(["set-option", "-t", session, "-g", "pane-border-format", " #T "]);
   await tmux(["select-pane", "-t", session, "-T", first.toUpperCase()]);
 
   // One split per remaining role, re-tiling so all panes stay visible.

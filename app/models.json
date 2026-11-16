@@ -10,5 +10,9 @@
   "gemini": {
     "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
     "efforts": []
+  },
+  "ollama": {
+    "models": [],
+    "efforts": []
   }
 }

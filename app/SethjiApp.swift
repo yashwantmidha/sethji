@@ -74,17 +74,20 @@ struct CrewInfo {
     var detail: [String: String] // role -> "agent · mode"
     var agents: [String: String] // role -> agent name
     var roster: [String]         // built-ins + agents declared in crew.json
+    var check: [String] = []     // crew.json "check" argv, if any
+    var modes: [String: String] = [:] // role -> read | write | yolo
     var loopFrom: String?
     var loopTo: String?
     var maxRounds: Int
 
-    static let builtinAgents = ["claude", "codex", "gemini"]
+    static let builtinAgents = ["claude", "codex", "gemini", "ollama"]
 
     static let fallback = CrewInfo(
         workflow: ["architect", "coder", "qa"],
         detail: ["architect": "claude · read", "coder": "codex · write", "qa": "gemini · read"],
         agents: ["architect": "claude", "coder": "codex", "qa": "gemini"],
         roster: builtinAgents,
+        modes: ["architect": "read", "coder": "write", "qa": "read"],
         loopFrom: "qa", loopTo: "coder", maxRounds: 2
     )
 
@@ -97,12 +100,14 @@ struct CrewInfo {
 
         var detail: [String: String] = [:]
         var agents: [String: String] = [:]
+        var modes: [String: String] = [:]
         if let roles = json["roles"] as? [String: [String: Any]] {
             for (name, def) in roles {
                 let agent = def["agent"] as? String ?? "?"
                 let mode = def["mode"] as? String ?? "read"
                 detail[name] = "\(agent) · \(mode)"
                 agents[name] = agent
+                modes[name] = mode
             }
         }
         var from: String?
@@ -121,6 +126,7 @@ struct CrewInfo {
         var seen = Set<String>()
         let unique = workflow.filter { seen.insert($0).inserted }
         return (CrewInfo(workflow: unique, detail: detail, agents: agents, roster: roster,
+                         check: json["check"] as? [String] ?? [], modes: modes,
                          loopFrom: from, loopTo: to, maxRounds: max), true)
     }
 }
@@ -156,6 +162,9 @@ struct ModelCatalog {
             "claude": Entry(models: ["opus", "sonnet", "haiku"], efforts: ["low", "medium", "high"]),
             "codex": Entry(models: ["gpt-5-codex", "gpt-5", "o3"], efforts: ["minimal", "low", "medium", "high"]),
             "gemini": Entry(models: ["gemini-2.5-pro", "gemini-2.5-flash"], efforts: []),
+            // No static suggestions: the dropdown is filled with the models
+            // actually pulled (`sethji models ollama`).
+            "ollama": Entry(models: [], efforts: []),
         ])
     }
 }
@@ -240,6 +249,63 @@ final class RoleChip: NSView {
     }
 }
 
+// MARK: - CLI access ---------------------------------------------------------
+
+/// zsh prelude that finds the sethji CLI. Login shell for PATH; also source
+/// ~/.zshrc quietly because nvm-style setups only add node there. Defines
+/// `run_sethji <args…>`, which replaces the shell with the CLI.
+private let cliPrelude = """
+[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" >/dev/null 2>&1
+run_sethji() {
+  if command -v sethji >/dev/null 2>&1; then
+    exec sethji "$@"
+  elif [ -n "${SETHJI_CLI:-}" ] && [ -f "$SETHJI_CLI" ] && command -v node >/dev/null 2>&1; then
+    exec node "$SETHJI_CLI" "$@"
+  else
+    echo "sethji not found. Install it (npm i -g sethji) or re-run app/install_app.sh from the repo."
+    exit 127
+  fi
+}
+
+"""
+
+/// The app's environment plus the repo CLI path the installer recorded.
+private func cliEnvironment() -> [String: String] {
+    var env = ProcessInfo.processInfo.environment
+    if let cli = UserDefaults.standard.string(forKey: "SethjiCLI"), !cli.isEmpty {
+        env["SETHJI_CLI"] = cli
+    }
+    return env
+}
+
+/// The models an agent really has (`sethji models <agent>`), default first.
+/// Runs off the main thread; `done` is called on it, with [] on any failure.
+private func fetchInstalledModels(agent: String, done: @escaping ([String]) -> Void) {
+    DispatchQueue.global(qos: .utility).async {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-lc", cliPrelude + "run_sethji models \"$SETHJI_AGENT\""]
+        var env = cliEnvironment()
+        env["SETHJI_AGENT"] = agent
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        var names: [String] = []
+        if (try? p.run()) != nil {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            if p.terminationStatus == 0 {
+                names = String(decoding: data, as: UTF8.self)
+                    .split(separator: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+            }
+        }
+        DispatchQueue.main.async { done(names) }
+    }
+}
+
 // MARK: - Runner -------------------------------------------------------------
 
 /// Spawns the sethji CLI and streams its combined stdout+stderr.
@@ -251,37 +317,30 @@ final class SethjiRunner {
 
     func start(task: String, cwd: String,
                agents: String = "", models: String = "", efforts: String = "",
+               check: String = "", modes: String = "",
                onChunk: @escaping (String) -> Void,
                onDone: @escaping (Int32) -> Void) throws {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        // Login shell for PATH; also source ~/.zshrc quietly because nvm-style
-        // setups only add node there. Per-role model/effort overrides travel in
-        // env vars too, becoming --model/--effort "role=value,…" flags.
-        let script = """
-        [ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" >/dev/null 2>&1
+        // Per-role model/effort overrides travel in env vars too, becoming
+        // --model/--effort "role=value,…" flags.
+        let script = cliPrelude + """
         ARGS=(run "$SETHJI_TASK" --no-color)
         [ -n "${SETHJI_AGENTS:-}" ] && ARGS+=(--agent "$SETHJI_AGENTS")
         [ -n "${SETHJI_MODELS:-}" ] && ARGS+=(--model "$SETHJI_MODELS")
         [ -n "${SETHJI_EFFORTS:-}" ] && ARGS+=(--effort "$SETHJI_EFFORTS")
-        if command -v sethji >/dev/null 2>&1; then
-          exec sethji "${ARGS[@]}"
-        elif [ -n "${SETHJI_CLI:-}" ] && [ -f "$SETHJI_CLI" ] && command -v node >/dev/null 2>&1; then
-          exec node "$SETHJI_CLI" "${ARGS[@]}"
-        else
-          echo "sethji not found. Install it (npm i -g sethji) or re-run app/install_app.sh from the repo."
-          exit 127
-        fi
+        [ -n "${SETHJI_CHECK:-}" ] && ARGS+=(--check "$SETHJI_CHECK")
+        [ -n "${SETHJI_MODES:-}" ] && ARGS+=(--mode "$SETHJI_MODES")
+        run_sethji "${ARGS[@]}"
         """
         p.arguments = ["-lc", script]
-        var env = ProcessInfo.processInfo.environment
+        var env = cliEnvironment()
         env["SETHJI_TASK"] = task
         if !agents.isEmpty { env["SETHJI_AGENTS"] = agents }
         if !models.isEmpty { env["SETHJI_MODELS"] = models }
         if !efforts.isEmpty { env["SETHJI_EFFORTS"] = efforts }
-        if let cli = UserDefaults.standard.string(forKey: "SethjiCLI"), !cli.isEmpty {
-            env["SETHJI_CLI"] = cli
-        }
+        if !check.isEmpty { env["SETHJI_CHECK"] = check }
+        if !modes.isEmpty { env["SETHJI_MODES"] = modes }
         p.environment = env
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
 
@@ -291,7 +350,11 @@ final class SethjiRunner {
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return } // EOF; terminationHandler unhooks us
-            guard let s = String(data: data, encoding: .utf8) else { return }
+            // Lossy decode: a chunk that splits a multibyte char must not be
+            // dropped whole (String(data:encoding:) returns nil for it).
+            // ponytail: the split char itself renders as U+FFFD; carry the
+            // partial bytes over to the next chunk if that ever matters.
+            let s = String(decoding: data, as: UTF8.self)
             DispatchQueue.main.async { onChunk(s) }
         }
         p.terminationHandler = { proc in
@@ -340,7 +403,13 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
     private var agentPopups: [String: NSPopUpButton] = [:]
     private var modelFields: [String: NSTextField] = [:]
     private var effortPopups: [String: NSPopUpButton] = [:]
+    private var modePopups: [String: NSPopUpButton] = [:]
+    private var checkField: NSTextField?
     private let catalog = ModelCatalog.load()
+    // Models an agent really has installed (asked from the CLI), default first.
+    // ponytail: ollama only, fetched once at launch — restart the app after
+    // pulling a model; ask per roster agent / on popover open if that annoys.
+    private var installed: [String: [String]] = [:]
     // Output + verdict
     private var outputView: NSTextView!
     private let banner = NSTextField(labelWithString: "")
@@ -467,7 +536,10 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
         clearButton.bezelStyle = .rounded
         let bottomSpacer = NSView()
         bottomSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bottomRow = NSStackView(views: [banner, bottomSpacer, clearButton])
+        let copyButton = NSButton(title: "Copy", target: self, action: #selector(copyOutput(_:)))
+        copyButton.bezelStyle = .rounded
+        copyButton.toolTip = "Copy the whole log to the clipboard"
+        let bottomRow = NSStackView(views: [banner, bottomSpacer, copyButton, clearButton])
         bottomRow.orientation = .horizontal
         bottomRow.spacing = 8
         bottomRow.alignment = .centerY
@@ -500,6 +572,13 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
         self.view = root
         taskField.stringValue = UserDefaults.standard.string(forKey: "LastTask") ?? ""
         refreshProjectUI()
+
+        fetchInstalledModels(agent: "ollama") { [weak self] names in
+            guard let self = self, !names.isEmpty else { return }
+            self.installed["ollama"] = names
+            self.saveOverrides() // keep anything typed while we were asking
+            self.rebuildConfigRows()
+        }
     }
 
     private func refreshProjectUI() {
@@ -525,8 +604,25 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
         UserDefaults.standard.dictionary(forKey: overridesKey) as? [String: [String: String]] ?? [:]
     }
 
+    // The check command typed in the panel (per project folder). Empty means
+    // "whatever crew.json says"; the CLI gets it as --check and splits it.
+    private var checkKey: String { "Check:" + cwd }
+    private var checkOverride: String { UserDefaults.standard.string(forKey: checkKey) ?? "" }
+    /// What will actually run: the panel's command, else crew.json's.
+    private var effectiveCheck: String {
+        checkOverride.isEmpty ? crew.check.joined(separator: " ") : checkOverride
+    }
+
     /// Read the current UI into UserDefaults (keyed per project folder).
     private func saveOverrides() {
+        if let field = checkField {
+            let typed = field.stringValue.trimmingCharacters(in: .whitespaces)
+            if typed.isEmpty {
+                UserDefaults.standard.removeObject(forKey: checkKey)
+            } else {
+                UserDefaults.standard.set(typed, forKey: checkKey)
+            }
+        }
         var all: [String: [String: String]] = [:]
         for role in crew.workflow {
             var entry: [String: String] = [:]
@@ -543,6 +639,9 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
                let e = popup.titleOfSelectedItem, catalog.efforts(for: chosenAgent).contains(e) {
                 entry["effort"] = e
             }
+            if let m = modePopups[role]?.titleOfSelectedItem, m != (crew.modes[role] ?? "read") {
+                entry["mode"] = m
+            }
             if !entry.isEmpty { all[role] = entry }
         }
         if all.isEmpty {
@@ -557,8 +656,24 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
         let saved = savedOverrides()
         return crew.workflow.compactMap { role -> String? in
             guard let v = saved[role]?[field], !v.isEmpty else { return nil }
+            // A remembered agent that this project no longer has (crew.json
+            // changed) would fail every run — fall back to the crew's own.
+            if field == "agent", !crew.roster.contains(v) { return nil }
+            // Same for a mode the role's current agent cannot do.
+            if field == "mode" {
+                let agent = saved[role]?["agent"].flatMap { crew.roster.contains($0) ? $0 : nil }
+                    ?? crew.agents[role] ?? "claude"
+                if !modes(for: agent).contains(v) { return nil }
+            }
             return "\(role)=\(v)"
         }.joined(separator: ",")
+    }
+
+    /// Modes an agent supports.
+    // ponytail: ollama hardcoded as read-only; a custom read-only agent still
+    // offers all three and the CLI rejects it. Ask the CLI if that bites.
+    private func modes(for agent: String) -> [String] {
+        agent == "ollama" ? ["read"] : ["read", "write", "yolo"]
     }
 
     private func rebuildConfigRows() {
@@ -569,15 +684,17 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
         agentPopups.removeAll()
         modelFields.removeAll()
         effortPopups.removeAll()
+        modePopups.removeAll()
         let saved = savedOverrides()
         for role in crew.workflow {
             let name = NSTextField(labelWithString: role.uppercased())
             name.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .bold)
             name.textColor = roleColor(role)
-            name.widthAnchor.constraint(equalToConstant: 90).isActive = true
+            name.widthAnchor.constraint(equalToConstant: 80).isActive = true
 
             // Which AI runs this role: built-ins + agents declared in crew.json.
-            let currentAgent = saved[role]?["agent"] ?? crew.agents[role] ?? "claude"
+            let remembered = saved[role]?["agent"].flatMap { crew.roster.contains($0) ? $0 : nil }
+            let currentAgent = remembered ?? crew.agents[role] ?? "claude"
             let agentPopup = NSPopUpButton()
             agentPopup.addItems(withTitles: crew.roster)
             if !crew.roster.contains(currentAgent) { agentPopup.addItem(withTitle: currentAgent) }
@@ -591,11 +708,13 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
             let model = NSComboBox()
             model.usesDataSource = false
             model.completes = true
-            model.addItems(withObjectValues: catalog.models(for: currentAgent))
-            model.placeholderString = "model (default)"
+            let have = installed[currentAgent]
+            model.addItems(withObjectValues: have ?? catalog.models(for: currentAgent))
+            // Left empty, the CLI uses the agent's first installed model.
+            model.placeholderString = have?.first.map { "default: \($0)" } ?? "model (default)"
             model.font = NSFont.systemFont(ofSize: 11)
             model.stringValue = saved[role]?["model"] ?? ""
-            model.widthAnchor.constraint(equalToConstant: 160).isActive = true
+            model.widthAnchor.constraint(equalToConstant: 140).isActive = true
             modelFields[role] = model
 
             let efforts = catalog.efforts(for: currentAgent)
@@ -608,12 +727,43 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
             effort.isEnabled = !efforts.isEmpty
             effortPopups[role] = effort
 
-            let row = NSStackView(views: [name, agentPopup, model, effort])
+            // How much the agent may touch: only the modes it can do.
+            let mode = NSPopUpButton()
+            mode.addItems(withTitles: modes(for: currentAgent))
+            mode.selectItem(withTitle: saved[role]?["mode"] ?? crew.modes[role] ?? "read")
+            if mode.indexOfSelectedItem < 0 { mode.selectItem(at: 0) }
+            mode.isEnabled = mode.numberOfItems > 1
+            mode.font = NSFont.systemFont(ofSize: 11)
+            mode.toolTip = "read: inspect only · write: edit files, no commands · "
+                + "yolo: edit files and run ANY command without asking"
+            modePopups[role] = mode
+
+            let row = NSStackView(views: [name, agentPopup, model, effort, mode])
             row.orientation = .horizontal
             row.spacing = 8
             row.alignment = .centerY
             configStack.addArrangedSubview(row)
         }
+
+        // Check command: a real test/build run that gates the verdict.
+        let checkName = NSTextField(labelWithString: "CHECK")
+        checkName.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .bold)
+        checkName.textColor = roleColor("check")
+        checkName.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        let field = NSTextField()
+        field.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        field.placeholderString = crew.check.isEmpty
+            ? "command that must pass — e.g. npm test"
+            : crew.check.joined(separator: " ") + "   (from crew.json)"
+        field.stringValue = checkOverride
+        field.toolTip = "Runs before QA each round. A non-zero exit fails the round and goes back to the coder."
+        field.widthAnchor.constraint(equalToConstant: 380).isActive = true
+        checkField = field
+        let checkRow = NSStackView(views: [checkName, field])
+        checkRow.orientation = .horizontal
+        checkRow.spacing = 8
+        checkRow.alignment = .centerY
+        configStack.addArrangedSubview(checkRow)
     }
 
     /// Agent switched: persist, then rebuild so model/effort suggestions match.
@@ -628,17 +778,29 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
             v.removeFromSuperview()
         }
         chips.removeAll()
-        for (i, role) in crew.workflow.enumerated() {
-            if i > 0 {
+        func addChip(_ name: String, detail: String) {
+            if !chips.isEmpty {
                 let arrow = NSTextField(labelWithString: "→")
                 arrow.font = NSFont.systemFont(ofSize: 11)
                 arrow.textColor = .tertiaryLabelColor
                 chipsRow.addArrangedSubview(arrow)
             }
-            let chip = RoleChip(role: role, detail: crew.detail[role] ?? role)
-            chips[role] = chip
+            let chip = RoleChip(role: name, detail: detail)
+            chips[name] = chip
             chipsRow.addArrangedSubview(chip)
         }
+        // The check sits where the CLI runs it: right before the loop's
+        // reviewing role, or last when the crew has no loop.
+        let check = effectiveCheck
+        var checkPlaced = check.isEmpty
+        for role in crew.workflow {
+            if !checkPlaced, role == crew.loopFrom {
+                addChip("check", detail: check)
+                checkPlaced = true
+            }
+            addChip(role, detail: crew.detail[role] ?? role)
+        }
+        if !checkPlaced { addChip("check", detail: check) }
         loopBadge.stringValue = ""
         chipsRow.addArrangedSubview(loopBadge)
     }
@@ -693,6 +855,7 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
                 task: task, cwd: cwd,
                 agents: overrideSpec("agent"),
                 models: overrideSpec("model"), efforts: overrideSpec("effort"),
+                check: checkOverride, modes: overrideSpec("mode"),
                 onChunk: { [weak self] chunk in self?.feed(chunk) },
                 onDone: { [weak self] status in self?.finished(status: status) }
             )
@@ -721,6 +884,16 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
         lineBuffer = ""
         loopBadge.stringValue = ""
         for chip in chips.values { chip.state = .pending }
+    }
+
+    /// Copy the whole log, as plain text, to the clipboard.
+    @objc private func copyOutput(_ sender: NSButton) {
+        let text = outputView.string
+        guard !text.isEmpty else { NSSound.beep(); return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        sender.title = "Copied ✓"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { sender.title = "Copy" }
     }
 
     @objc func openLogs() {
@@ -776,6 +949,12 @@ final class RunViewController: NSViewController, NSTextFieldDelegate {
         if line.hasPrefix("↻") {
             if let m = line.range(of: #"round \d+/\d+"#, options: .regularExpression) {
                 loopBadge.stringValue = "↻ \(line[m])"
+            }
+            // Whoever just ran (QA or the check) is what failed the round:
+            // leave it red instead of letting the next header tick it ✓.
+            if let failed = activeRole {
+                chips[failed]?.state = .fail
+                activeRole = nil
             }
             append(line + "\n", color: .systemOrange)
             return

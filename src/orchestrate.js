@@ -1,5 +1,5 @@
 import { buildInvocation, BUILTIN_ADAPTERS, mergeAdapters } from "./adapters.js";
-import { runAgent } from "./run.js";
+import { runAgent, modelProblem, defaultModel } from "./run.js";
 import { NULL_LOGGER } from "./logs.js";
 
 // Raw ANSI colors (no chalk). One per role header, cycled.
@@ -66,6 +66,9 @@ function hashish(s) {
   return h;
 }
 
+// How much check output to keep in the transcript (chars, from the end).
+const CHECK_OUTPUT_MAX = 8000;
+
 // Run the whole crew over a task.
 //
 // opts:
@@ -100,11 +103,103 @@ export async function orchestrate({
   let verdict = "PASS";
   let reason = "";
 
+  // Count a loop round, announce it, and return the index to resume from.
+  const loopBack = () => {
+    rounds++;
+    const noteMsg = `↻ QA failed (round ${rounds}/${maxRounds}): ${
+      reason || "no reason given"
+    } — looping back to ${loop.to}.`;
+    write(`\n${color ? ANSI.dim : ""}${noteMsg}${color ? ANSI.reset : ""}\n`);
+    logger.note(noteMsg);
+    return crew.workflow.indexOf(loop.to);
+  };
+
+  // Run the crew's "check" command (e.g. ["npm", "test"]) so the verdict rests
+  // on a real result, not only on QA reading the code. The output joins the
+  // transcript as a CHECK turn for QA and the coder to read.
+  // Returns "pass", "fail" (ran, non-zero exit) or "error" (never produced an
+  // exit code: missing, timed out, stopped). Sets verdict/reason unless "pass".
+  const runCheck = async () => {
+    const [bin, ...args] = crew.check;
+    const label = crew.check.join(" ");
+    printHeader("check", label, "run", color, write);
+    const emit = (chunk) => {
+      write(chunk);
+      logger.roleChunk("check", chunk);
+    };
+    const res = await runner({ bin, args, cwd, timeout, onData: emit });
+    // Test runners often report on stderr; it is not streamed, so show it now.
+    if (res.stderr) emit(`\n${res.stderr}\n`);
+
+    if (typeof res.code !== "number") {
+      emit(`\n[error] ${res.error}\n`);
+      transcript.push({ role: "check", text: `[error] ${res.error}` });
+      verdict = "FAIL";
+      reason = res.error;
+      return "error";
+    }
+    const output = [res.stdout, res.stderr].filter(Boolean).join("\n");
+    // Failures print last, so keep the tail; the transcript is re-sent every turn.
+    const shown =
+      output.length > CHECK_OUTPUT_MAX
+        ? `…(earlier output trimmed)\n${output.slice(-CHECK_OUTPUT_MAX)}`
+        : output;
+    transcript.push({ role: "check", text: `$ ${label}\n${shown}\n[exit ${res.code}]` });
+    if (res.code === 0) return "pass";
+    verdict = "FAIL";
+    reason = `check failed: "${label}" exited with code ${res.code}`;
+    return "fail";
+  };
+
+  // Before anything runs, settle every role's model. A role with none, on an
+  // agent that needs one, gets that agent's default. And each model must
+  // already be installed, or an agent like ollama would start a silent
+  // multi-GB download mid-run.
+  const roles = { ...crew.roles };
+  const defaults = new Map(); // agent -> its default model, looked up once
+  for (const roleName of new Set(crew.workflow)) {
+    const def = roles[roleName];
+    const adapter = adapters[def.agent];
+    if (!adapter) continue; // reported as an unknown agent when the role runs
+    let problem = null;
+    try {
+      if (adapter.requiresModel && !def.model) {
+        if (!defaults.has(def.agent)) {
+          defaults.set(def.agent, await defaultModel(def.agent, adapter, runner));
+        }
+        const model = defaults.get(def.agent);
+        roles[roleName] = { ...def, model };
+        write(`${roleName}: no model set, using ${def.agent} default ${model}.\n`);
+      }
+      problem = await modelProblem(def.agent, adapter, roles[roleName].model, runner);
+    } catch (err) {
+      problem = err.message;
+    }
+    if (problem) {
+      write(`\n${problem}\n`);
+      const result = { transcript, verdict: "FAIL", reason: problem, rounds };
+      logger.finish(result);
+      return result;
+    }
+  }
+
   // We walk the workflow by index so the loop can jump back to loop.to.
   let i = 0;
   while (i < crew.workflow.length) {
     const roleName = crew.workflow[i];
-    const def = crew.roles[roleName];
+
+    // The check runs right before the reviewing role. A failing check is the
+    // verdict: QA is not asked, and the coder gets the output as feedback.
+    if (crew.check && loop && roleName === loop.from) {
+      const outcome = await runCheck();
+      if (outcome === "fail" && rounds < maxRounds) {
+        i = loopBack();
+        continue;
+      }
+      if (outcome !== "pass") break;
+    }
+
+    const def = roles[roleName];
     const mode = def.mode || "read";
 
     // Build this turn's prompt and the concrete CLI invocation.
@@ -118,8 +213,9 @@ export async function orchestrate({
     } catch (err) {
       write(`\n${err.message}\n`);
       transcript.push({ role: roleName, text: `[error] ${err.message}` });
-      i++;
-      continue;
+      verdict = "FAIL";
+      reason = err.message;
+      break;
     }
 
     printHeader(roleName, def.agent, mode, color, write);
@@ -142,26 +238,30 @@ export async function orchestrate({
     }
     transcript.push({ role: roleName, text });
 
+    // An agent that crashed, timed out, or was stopped did no work: the run
+    // fails here. Carrying on would let a missing verdict read as PASS.
+    if (!res.ok) {
+      verdict = "FAIL";
+      reason = res.error;
+      break;
+    }
+
     // If this is the loop's "from" role, check the verdict and maybe jump back.
     if (loop && roleName === loop.from) {
-      const v = parseVerdict(res.ok ? res.stdout : "");
+      const v = parseVerdict(res.stdout);
       verdict = v.verdict;
       reason = v.reason;
       if (verdict === "FAIL" && rounds < maxRounds) {
-        rounds++;
-        const backTo = crew.workflow.indexOf(loop.to);
-        const noteMsg = `↻ QA failed (round ${rounds}/${maxRounds}): ${
-          reason || "no reason given"
-        } — looping back to ${loop.to}.`;
-        write(`\n${color ? ANSI.dim : ""}${noteMsg}${color ? ANSI.reset : ""}\n`);
-        logger.note(noteMsg);
-        i = backTo;
+        i = loopBack();
         continue;
       }
     }
 
     i++;
   }
+
+  // No loop to hang the check on: run it once after the last role.
+  if (crew.check && !loop && verdict === "PASS") await runCheck();
 
   const result = { transcript, verdict, reason, rounds };
   logger.finish(result); // write transcript.md + result.json for the main to review

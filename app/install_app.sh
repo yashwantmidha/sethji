@@ -9,6 +9,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT_DIR/app/SethjiApp.swift"
 APP="$HOME/Applications/sethji.app"
 BUNDLE_ID="com.yashwantmidha.sethji"
+# App version tracks package.json so the two never drift.
+VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT_DIR/package.json" | head -1)"
 MODULE_CACHE="$(mktemp -d /tmp/sethji-swift-cache.XXXXXX)"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
 
@@ -80,7 +82,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>${VERSION:-0.0.0}</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSHighResolutionCapable</key>

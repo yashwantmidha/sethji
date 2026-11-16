@@ -71,6 +71,13 @@ export function validateCrew(crew) {
 
   // Every role used in the workflow must exist and be well-formed.
   for (const role of crew.workflow) {
+    // Role names become log file names and tmux pane commands, and crews can be
+    // drafted by a model — so no path separators, quotes, or shell syntax.
+    if (!/^[\w-]+$/.test(role)) {
+      throw new Error(
+        `Role name "${role}" is invalid — use only letters, digits, "_" and "-".`
+      );
+    }
     const def = crew.roles[role];
     if (!def) {
       throw new Error(`Workflow references unknown role "${role}".`);
@@ -89,6 +96,15 @@ export function validateCrew(crew) {
         `Role "${role}" has invalid mode "${def.mode}". Use one of: ${MODES.join(", ")}.`
       );
     }
+    // Catch a mode the agent cannot do (e.g. a text-only local model asked to
+    // write) before any agent has run, not halfway through the workflow.
+    const mode = def.mode || "read";
+    if (!adapters[def.agent].modes[mode]) {
+      throw new Error(
+        `Role "${role}" wants mode "${mode}", but agent "${def.agent}" has no mode "${mode}". ` +
+          `Available modes: ${Object.keys(adapters[def.agent].modes).join(", ")}.`
+      );
+    }
     for (const [field, flag] of [["model", "modelFlag"], ["effort", "effortFlag"]]) {
       const value = def[field];
       if (value !== undefined && (typeof value !== "string" || !value)) {
@@ -100,6 +116,19 @@ export function validateCrew(crew) {
             `Add one to its adapter.`
         );
       }
+    }
+  }
+
+  // The optional check is an argv array (no shell), like an adapter's modes.
+  if (crew.check !== undefined) {
+    const ok =
+      Array.isArray(crew.check) &&
+      crew.check.length > 0 &&
+      crew.check.every((a) => typeof a === "string" && a);
+    if (!ok) {
+      throw new Error(
+        'Crew config "check" must be a non-empty array of strings, e.g. ["npm", "test"].'
+      );
     }
   }
 

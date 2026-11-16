@@ -38,6 +38,25 @@ export const BUILTIN_ADAPTERS = {
       yolo: ["-p", "{prompt}", "-y"],
     },
   },
+  // Local models: `ollama run <model> "<prompt>"`. Text in, text out — it has
+  // no file tools, so it only offers "read". Use it for planning and review
+  // roles and keep claude/codex as the writer.
+  ollama: {
+    bin: "ollama",
+    modelFlag: ["{model}"],
+    requiresModel: true,
+    // A role that names no model gets the first one `ollama list` prints
+    // (the most recently pulled or updated).
+    listModels: ["list"],
+    // `ollama run` silently downloads a model it lacks (several GB); `show`
+    // only looks, so sethji asks first and refuses to start a download.
+    modelCheck: ["show", "{model}"],
+    modes: {
+      // --nowordwrap: otherwise ollama re-draws wrapped words with cursor
+      // escape codes, which land in the transcript as duplicated fragments.
+      read: ["run", "--nowordwrap", "{prompt}"],
+    },
+  },
 };
 
 export const MODES = ["read", "write", "yolo"];
@@ -69,7 +88,7 @@ export function mergeAdapters(roster = {}, base = BUILTIN_ADAPTERS) {
       );
     }
     const adapter = { bin, modes };
-    for (const flag of ["modelFlag", "effortFlag"]) {
+    for (const flag of ["modelFlag", "effortFlag", "requiresModel", "listModels", "modelCheck"]) {
       const value = entry[flag] !== undefined ? entry[flag] : fallback[flag];
       if (value) adapter[flag] = value;
     }
@@ -114,6 +133,11 @@ export function buildInvocation(agent, mode, prompt, adapters = BUILTIN_ADAPTERS
     );
   }
   const { model, effort } = options;
+  if (adapter.requiresModel && !model) {
+    throw new Error(
+      `Agent "${agent}" needs a model (e.g. --model qwen2.5-coder, or "model" on the role).`
+    );
+  }
   const extra = [];
   if (model) {
     if (!adapter.modelFlag) {

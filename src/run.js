@@ -14,13 +14,23 @@ import { spawn } from "node:child_process";
 // orchestrator can keep going and show a friendly message.
 export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
   return new Promise((resolve) => {
+    if (stopping) {
+      resolve({ ok: false, stdout: "", stderr: "", code: null, error: "Run was stopped." });
+      return;
+    }
     let child;
     try {
-      child = spawn(bin, args, { cwd, shell: false });
+      // stdin is closed: the prompt travels in argv, and a CLI that sees an
+      // open stdin pipe (codex exec) waits on it forever.
+      child = spawn(bin, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
       resolve(spawnFailure(bin, err));
       return;
     }
+    active.add(child);
+    // Decode as a stream so a multibyte char split across chunks stays intact.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
 
     let stdout = "";
     let stderr = "";
@@ -34,23 +44,24 @@ export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
       }, timeout);
     }
 
-    child.stdout.on("data", (buf) => {
-      const text = buf.toString();
+    child.stdout.on("data", (text) => {
       stdout += text;
       if (onData) onData(text);
     });
-    child.stderr.on("data", (buf) => {
-      stderr += buf.toString();
+    child.stderr.on("data", (text) => {
+      stderr += text;
     });
 
     // ENOENT etc. arrive as an "error" event, not a throw.
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
+      active.delete(child);
       resolve(spawnFailure(bin, err));
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (timer) clearTimeout(timer);
+      active.delete(child);
       if (timedOut) {
         resolve({
           ok: false,
@@ -69,12 +80,69 @@ export function runAgent({ bin, args = [], cwd, timeout = 0, onData } = {}) {
         error:
           code === 0
             ? null
-            : `Agent "${bin}" exited with code ${code}.${
-                stderr.trim() ? ` ${stderr.trim()}` : ""
-              }`,
+            : `Agent "${bin}" ${
+                signal ? `was stopped (${signal})` : `exited with code ${code}`
+              }.${stderr.trim() ? ` ${stderr.trim()}` : ""}`,
       });
     });
   });
+}
+
+// The models an agent has installed, via its "listModels" command (ollama:
+// `list`), which prints a header row then one model per line, name first.
+// Empty when the agent cannot list models or the command fails.
+export async function installedModels(adapter, runner = runAgent) {
+  if (!adapter.listModels) return [];
+  const res = await runner({ bin: adapter.bin, args: adapter.listModels, timeout: 30000 });
+  if (!res.ok) return [];
+  return res.stdout
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter(Boolean);
+}
+
+// The model to use when a role names none, for agents that cannot run without
+// one (ollama): the first model the agent's "listModels" command prints — a
+// header row, then one model per line, name first. Throws if there is none.
+export async function defaultModel(agent, adapter, runner = runAgent) {
+  const [first] = await installedModels(adapter, runner);
+  if (!first) {
+    throw new Error(
+      `Agent "${agent}" was given no model and has none installed to default to. ` +
+        `Install one (for ollama: ollama pull qwen2.5-coder) or set a model.`
+    );
+  }
+  return first;
+}
+
+// Preflight for agents with a "modelCheck" argv template (ollama: `show
+// {model}`): does the agent actually have this model? Returns null when fine
+// or when there is nothing to check, else a message saying what is missing.
+export async function modelProblem(agent, adapter, model, runner = runAgent) {
+  if (!adapter.modelCheck || !model) return null;
+  const args = adapter.modelCheck.map((a) => a.split("{model}").join(model));
+  const res = await runner({ bin: adapter.bin, args, timeout: 30000 });
+  if (res.ok) return null;
+  return (
+    `Agent "${agent}" does not have model "${model}" ` +
+    `(checked with: ${[adapter.bin, ...args].join(" ")}). ` +
+    `Install it first — for ollama: ollama pull ${model}. ${res.error}`
+  );
+}
+
+// Children currently running, so a stop can take them down with us.
+const active = new Set();
+let stopping = false;
+
+// Stop the run: terminate every running agent and refuse to start new ones.
+// Without this, killing sethji orphans the agent CLI, which keeps editing files.
+// ponytail: SIGTERM to the direct child only; an agent that ignores it or has
+// its own grandchildren survives — spawn detached + kill the process group if
+// that shows up.
+export function stopAgents() {
+  stopping = true;
+  for (const child of active) child.kill("SIGTERM");
 }
 
 // Turn a spawn-time error into a friendly, actionable result.
